@@ -86,9 +86,11 @@ def create_accident_report_docx(
     cause_text: str,
     action_text: str,
     output_path: str = None,
+    source_references: list = None,  # ✅ 추가
 ) -> str:
     """
     [별지 제2호 서식] 건설사고 발생현황 보고 양식 DOCX 생성
+    + 관련 근거 자료 추가 (선택적)
     """
     doc = Document()
     
@@ -160,7 +162,7 @@ def create_accident_report_docx(
     doc.add_paragraph()
     
     # ==== 사고 상세 정보 테이블 ====
-    table2 = doc.add_table(rows=16, cols=4)
+    table2 = doc.add_table(rows=15, cols=4)  # ✅ 15행으로 변경 (14행까지 사용 + 비고 1행)
     table2.style = 'Table Grid'
     add_table_borders(table2)
     
@@ -174,7 +176,7 @@ def create_accident_report_docx(
         (6, '사고 종류', query_data.get('사고종류', ''), None),
         (7, '인적피해', '', [(2, '장비손실', '')]),
         (8, '구조물 손실', '', [(2, '피해금액', '')]),
-        (9, '공기지연', '', [(2, '안전관리계획서\n수립여부', '해당 : (  ), 해당없음 : (  )\n해당사유 : 영 제98조제1항(  )호')]),
+        (9, '공기지연', '', [(2, '안전관리계획서\n수립여부', '해당 : (  ), 해당없음 : (  )\n해당사유 : 의 제98조제1항(  )호')]),
     ]
     
     for row_idx, label, value, extra in row_data:
@@ -220,11 +222,101 @@ def create_accident_report_docx(
     cells[0].text = '사고조사 방법'
     cells[1].merge(cells[2]).merge(cells[3]).text = "1. 직접조사\n2. 사고조사위원회조사\n3. 노동부 재해조사시 합동조사"
     
-    # ==== 비고 ====
+    # ✅ ==== 관련 근거 자료 (13행) ====
     row_idx = 13
+    if source_references and len(source_references) > 0:
+        cells = table2.rows[row_idx].cells
+        set_cell_background(cells[0], 'E7E6E6')
+        cells[0].text = '관련\n근거자료'
+        cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in cells[0].paragraphs[0].runs:
+            run.font.bold = True
+            run.font.size = Pt(9)
+        
+        # 근거 자료 내용 작성
+        merged_cell = cells[1].merge(cells[2]).merge(cells[3])
+        merged_cell.text = ""  # 초기화
+        
+        # 각 근거 자료를 문단으로 추가
+        for i, ref in enumerate(source_references, 1):
+            # 구분선 (첫 번째 제외)
+            if i > 1:
+                sep_para = merged_cell.add_paragraph()
+                sep_run = sep_para.add_run('─' * 60)
+                sep_run.font.size = Pt(8)
+                sep_run.font.color.rgb = RGBColor(180, 180, 180)
+            
+            # 문서 제목
+            title_para = merged_cell.add_paragraph()
+            title_run = title_para.add_run(f'[문서 {ref["idx"]}] {ref["filename"]}')
+            title_run.font.size = Pt(9)
+            title_run.font.bold = True
+            title_run.font.color.rgb = RGBColor(0, 70, 140)
+            title_para.paragraph_format.space_after = Pt(2)
+            
+            # 위치 정보
+            if ref.get("hierarchy"):
+                loc_para = merged_cell.add_paragraph()
+                loc_run1 = loc_para.add_run('📍 위치: ')
+                loc_run1.font.size = Pt(8)
+                loc_run1.font.bold = True
+                loc_run2 = loc_para.add_run(ref["hierarchy"])
+                loc_run2.font.size = Pt(8)
+                loc_para.paragraph_format.space_after = Pt(2)
+            elif ref.get("section"):
+                loc_para = merged_cell.add_paragraph()
+                loc_run1 = loc_para.add_run('📍 섹션: ')
+                loc_run1.font.size = Pt(8)
+                loc_run1.font.bold = True
+                loc_run2 = loc_para.add_run(ref["section"])
+                loc_run2.font.size = Pt(8)
+                loc_para.paragraph_format.space_after = Pt(2)
+            
+            # 관련성 요약
+            if ref.get("relevance_summary"):
+                rel_para = merged_cell.add_paragraph()
+                rel_run1 = rel_para.add_run('💡 관련성: ')
+                rel_run1.font.size = Pt(8)
+                rel_run1.font.bold = True
+                rel_run2 = rel_para.add_run(ref["relevance_summary"])
+                rel_run2.font.size = Pt(8)
+                rel_para.paragraph_format.space_after = Pt(2)
+            
+            # 핵심 내용
+            key_sentences = ref.get("key_sentences", [])
+            if key_sentences:
+                key_para = merged_cell.add_paragraph()
+                key_run = key_para.add_run('🎯 핵심 내용:')
+                key_run.font.size = Pt(8)
+                key_run.font.bold = True
+                key_para.paragraph_format.space_after = Pt(2)
+                
+                for sentence in key_sentences[:3]:  # 최대 3개만
+                    sent_para = merged_cell.add_paragraph()
+                    sent_para.paragraph_format.left_indent = Cm(0.5)
+                    sent_run = sent_para.add_run(f'• {sentence}')
+                    sent_run.font.size = Pt(8)
+                    sent_para.paragraph_format.space_after = Pt(1)
+    else:
+        # 근거 자료가 없으면 비고로 사용
+        cells = table2.rows[row_idx].cells
+        set_cell_background(cells[0], 'E7E6E6')
+        cells[0].text = '비고'
+        cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in cells[0].paragraphs[0].runs:
+            run.font.bold = True
+            run.font.size = Pt(9)
+        cells[1].merge(cells[2]).merge(cells[3]).text = ""
+    
+    # ✅ ==== 비고 (14행, 맨 마지막) ====
+    row_idx = 14
     cells = table2.rows[row_idx].cells
     set_cell_background(cells[0], 'E7E6E6')
     cells[0].text = '비고'
+    cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in cells[0].paragraphs[0].runs:
+        run.font.bold = True
+        run.font.size = Pt(9)
     cells[1].merge(cells[2]).merge(cells[3]).text = ""
     
     # ==== 파일 저장 ====

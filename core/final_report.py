@@ -60,15 +60,31 @@ def summarize_accident_cause(rag_output: str, user_query: str) -> str:
 
 
 # === 2. 조치사항 및 향후조치계획 보고서 생성 ===
-def generate_action_plan(rag_output: str, user_query: str) -> str:
+def generate_action_plan(rag_output: str, user_query: str, source_references: list = None) -> str:
     """
     '조치사항 및 향후조치계획'을 상사 보고용 고품질 텍스트로 생성.
     - 즉시 조치
     - 원인 제거 조치
     - 재발 방지 대책
-    - 관련 근거
+    - 관련 근거 (✅ 신규: source_references 활용)
     를 구조적으로 포함해야 한다.
     """
+    
+    # ✅ 근거 자료 정보 구성
+    reference_info = ""
+    if source_references and len(source_references) > 0:
+        reference_info = "\n\n[참조 가능한 근거 문서 목록]\n"
+        for ref in source_references:
+            reference_info += f"- [문서 {ref['idx']}] {ref['filename']}"
+            if ref.get('section'):
+                reference_info += f" (섹션: {ref['section']})"
+            reference_info += "\n"
+            
+            if ref.get('key_sentences'):
+                reference_info += "  핵심 내용:\n"
+                for sentence in ref['key_sentences'][:2]:  # 처음 2개만
+                    reference_info += f"  • {sentence}\n"
+    
     system_message = {
         "role": "system",
         "content": """
@@ -79,17 +95,29 @@ def generate_action_plan(rag_output: str, user_query: str) -> str:
 - 실제 보고서 문서에 그대로 삽입할 수 있는 수준의 완성도를 갖출 것
 - RAG 문서에 포함된 내용만 근거로 사용 (외부 지식 추가 금지)
 - 문단 구조와 논리가 분명해야 함 (단순 bullet 나열 금지)
-- 각 조치가 "왜 필요한지", "어떤 근거에서 도출되었는지"를 설명할 것
+- ✅ **각 조치사항마다 어떤 문서를 근거로 했는지 명시할 것**
+  예: "산업안전보건기준에 관한 규칙에 따르면..."
+  예: "교량공사 안전작업지침(문서 1)에 명시된 바와 같이..."
 - 한국어 보고서 문체(서술형)로 작성할 것
 
 [구성]
 1. 즉시 조치 (Immediate Action)
+   - 각 조치의 근거 문서 명시
+   
 2. 원인 제거 조치 (Corrective Action)
+   - 각 조치의 근거 문서 명시
+   
 3. 재발 방지 대책 (Preventive Action)
-4. 관련 근거 (법령/지침/내부 기준 등) - 단, RAG 문서에 등장한 내용만 사용할 것
+   - 각 조치의 근거 문서 명시
+   
+4. 관련 근거 요약
+   - 주요 참조 문서 및 조항 정리
+
+[근거 명시 예시]
+"교량공사(라멘교) 안전보건작업지침(문서 1)에 따르면, 높이 4미터를 초과하는 경우 수평연결재를 설치하도록 규정하고 있다. 따라서..."
 
 [분량]
-- 최소 600자 이상, 가능하면 1000~1500자 내외로 충분히 상세히 작성
+- 최소 800자 이상, 가능하면 1200~1800자 내외로 충분히 상세히 작성
 - 각 항목은 하나 이상의 문단으로 구성
 """
     }
@@ -100,21 +128,25 @@ def generate_action_plan(rag_output: str, user_query: str) -> str:
 아래는 사고 개요와 RAG 기반 근거 문서이다.
 이를 바탕으로 '조치사항 및 향후조치계획'을 위 요구사항에 맞게 작성하라.
 
+**중요: 각 조치사항을 제시할 때, 반드시 어떤 문서를 근거로 했는지 명시하라.**
+
 [사고 개요]
 {user_query}
 
 [근거가 되는 RAG 문서]
 {rag_output}
+
+{reference_info}
 """
     }
 
     try:
-        print("🧠 [LLM 호출] 조치사항 및 향후조치계획 생성 중...")
+        print("🧠 [LLM 호출] 조치사항 및 향후조치계획 생성 중 (근거 명시 포함)...")
         text = call_llm(
             [system_message, user_message],
             temperature=0.3,
             top_p=0.9,
-            max_tokens=4000,  # gpt-4o 한도(16384) 내에서 여유롭게
+            max_tokens=4000,
         )
         if not text or "⚠️" in text:
             print("⚠️ 조치사항 및 향후조치계획 생성 실패:", text)

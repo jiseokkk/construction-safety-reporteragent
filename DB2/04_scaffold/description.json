@@ -1,0 +1,17 @@
+{
+    "name": "Scaffolding Safety DB",
+    "domain": "비계/가설",
+    "purpose": "비계, 달비계, 이동식 비계 등 고소작업 안전기준 제공.",
+    "covers": [
+        "비계 설치",
+        "달비계",
+        "이동식 비계"
+    ],
+    "common_accidents": [
+        "추락",
+        "비계 붕괴"
+    ],
+    "best_for_queries": [
+        "비계 추락 사고"
+    ]
+}

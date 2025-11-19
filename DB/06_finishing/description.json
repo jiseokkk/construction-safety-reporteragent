@@ -1,0 +1,17 @@
+{
+    "name": "Finishing Construction Safety DB",
+    "domain": "마감",
+    "purpose": "실내 마감공사 안전지침 제공.",
+    "covers": [
+        "석고보드",
+        "창호",
+        "내부 마감"
+    ],
+    "common_accidents": [
+        "사다리 전도",
+        "낙하"
+    ],
+    "best_for_queries": [
+        "실내 사다리 사고"
+    ]
+}

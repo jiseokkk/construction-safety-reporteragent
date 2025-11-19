@@ -1,0 +1,16 @@
+{
+    "name": "General Construction Safety DB",
+    "domain": "공통 안전",
+    "purpose": "모든 공종에서 공통적으로 적용되는 안전 기준 제공.",
+    "covers": [
+        "PPE",
+        "현장 안전 수칙"
+    ],
+    "common_accidents": [
+        "추락",
+        "낙하"
+    ],
+    "best_for_queries": [
+        "현장 안전수칙"
+    ]
+}

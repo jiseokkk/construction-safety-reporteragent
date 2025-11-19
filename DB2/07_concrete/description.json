@@ -1,0 +1,18 @@
+{
+    "name": "Concrete & Formwork Safety DB",
+    "domain": "콘크리트",
+    "purpose": "타설, 거푸집, 동바리 작업 안전기준 제공.",
+    "covers": [
+        "거푸집",
+        "동바리",
+        "타설"
+    ],
+    "common_accidents": [
+        "거푸집 붕괴",
+        "동바리 좌굴"
+    ],
+    "best_for_queries": [
+        "동바리 붕괴",
+        "타설 사고"
+    ]
+}

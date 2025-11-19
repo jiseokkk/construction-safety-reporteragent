@@ -1,0 +1,58 @@
+{
+  "01_bridge": {
+    "total_chunks": 168,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "02_earth": {
+    "total_chunks": 253,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "03_tunnel": {
+    "total_chunks": 129,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "04_scaffold": {
+    "total_chunks": 161,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "05_crane": {
+    "total_chunks": 180,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "06_finishing": {
+    "total_chunks": 85,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "07_concrete": {
+    "total_chunks": 63,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  },
+  "08_general": {
+    "total_chunks": 181,
+    "hierarchy_mismatch": 0,
+    "duplicate_chunks": 0,
+    "problematic_sections": [],
+    "quality_score": 1.0
+  }
+}
