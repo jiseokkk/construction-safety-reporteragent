@@ -30,10 +30,17 @@ def should_continue(state: AgentState) -> str:
         "continue": orchestrator_node를 다시 실행
         "end": 종료
     """
+    # ✅ 1) STOP 상태면 그래프 반복만 멈춤 (사용자 입력 대기)
+    if state.get("wait_for_user", False):
+        print("⛔ STOP 상태: 다음 사용자 입력까지 대기합니다.")
+        return "end"
+
+    # ✅ 2) is_complete=True 면 진짜 끝
     if state.get("is_complete", False):
         return "end"
-    else:
-        return "continue"
+
+    # 그 외에는 계속
+    return "continue"
 
 
 # ========================================
@@ -56,7 +63,7 @@ def create_graph():
     # 시작점
     workflow.set_entry_point("orchestrator")
     
-    # 조건부 엣지: 완료되면 END, 아니면 다시 orchestrator
+    # 조건부 엣지: STOP 또는 완료되면 END, 아니면 다시 orchestrator
     workflow.add_conditional_edges(
         "orchestrator",
         should_continue,

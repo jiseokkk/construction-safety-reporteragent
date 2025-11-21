@@ -58,3 +58,7 @@ class AgentState(TypedDict):
 
     # 7) 워크플로우 종료 여부
     is_complete: NotRequired[bool]
+
+    # 8) stop/wait 플래그
+    wait_for_user: NotRequired[bool]  
+    

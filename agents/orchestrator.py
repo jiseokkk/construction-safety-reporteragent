@@ -1,9 +1,8 @@
 """
-Orchestrator Agent (개선된 버전 v4)
+Orchestrator Agent (STOP 지원 버전)
 - user_intent 기반 판단 로직
-- WebSearchAgent 추가
-- "search_only": RAG만 실행 후 종료
-- "generate_report": RAG → (WebSearch) → ReportWriter → DOCX
+- search_only: RAG 완료 후 STOP
+- generate_report: RAG → (WebSearch) → ReportWriter → END
 """
 
 from typing import Optional
@@ -24,7 +23,7 @@ class OrchestratorAgent:
                 "type": "function",
                 "function": {
                     "name": "RAGAgent",
-                    "description": "문서 검색을 수행하는 Agent입니다. 검색이 필요하거나 불충분할 때 호출하세요.",
+                    "description": "문서 검색을 수행하는 Agent입니다.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -40,8 +39,7 @@ class OrchestratorAgent:
                     "name": "WebSearchAgent",
                     "description": (
                         "Tavily API로 웹 검색을 수행하는 Agent입니다. "
-                        "RAG 검색 결과가 부족하거나(3개 미만), 최신 정보가 필요하거나, "
-                        "사용자가 명시적으로 웹 검색을 요청한 경우에만 호출하세요."
+                        "RAG 결과가 부족하거나 사용자 요청 시 호출됩니다."
                     ),
                     "parameters": {
                         "type": "object",
@@ -56,10 +54,7 @@ class OrchestratorAgent:
                 "type": "function",
                 "function": {
                     "name": "ReportWriterAgent",
-                    "description": (
-                        "보고서 생성, DOCX 생성을 담당하는 Agent입니다. "
-                        "RAG 또는 웹 검색이 완료된 후 호출하세요."
-                    ),
+                    "description": "보고서 생성 및 DOCX 생성을 담당합니다.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -68,115 +63,74 @@ class OrchestratorAgent:
                         "required": ["reason"]
                     }
                 }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "END",
-                    "description": "모든 작업이 완료되었을 때만 호출합니다.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "reason": {"type": "string", "description": "종료하는 이유"}
-                        },
-                        "required": ["reason"]
-                    }
-                }
             }
+            # 🔴 END 툴은 굳이 필요 없어서 제거 (END는 우리가 직접 is_complete로 컨트롤)
         ]
 
-
+    # ===========================
+    #  상태 요약 (LLM 판단용)
+    # ===========================
     def _create_state_summary(self, state: AgentState) -> str:
-        """State를 LLM이 이해하기 쉬운 형식으로 요약"""
-        
         retrieved = state.get("retrieved_docs")
         report_ready = state.get("report_text")
         docx_ready = state.get("docx_path")
-        web_search_done = state.get("web_search_completed", False)
-        web_search_requested = state.get("web_search_requested", False)  # ✅ 추가
-        
-        # ✅ 사용자 의도 확인
+        web_done = state.get("web_search_completed", False)
+        web_req = state.get("web_search_requested", False)
         user_intent = state.get("user_intent", "generate_report")
 
         summary = f"""
-현재 시스템 상태:
+[현재 상태]
 
-[사용자 질의]
-{state.get('user_query', 'N/A')}
+STOP 상태: {state.get('wait_for_user', False)}
+사용자 의도: {user_intent}
 
-[사용자 의도]
-{user_intent}
-- "search_only": 정보 검색만 원함 (RAG → END)
-- "generate_report": 보고서 생성 원함 (RAG → (WebSearch) → ReportWriter → END)
+RAG 검색:
+- 완료: {bool(retrieved)}
+- 문서 수: {len(retrieved) if retrieved else 0}
 
-[RAG 검색 상태]
-- 문서 검색 완료: {'✅ 예' if retrieved else '❌ 아니오'}
-- 검색된 문서 수: {len(retrieved) if retrieved else 0}
+웹 검색:
+- 요청됨: {web_req}
+- 완료됨: {web_done}
 
-[웹 검색 상태]
-- 웹 검색 완료: {'✅ 예' if web_search_done else '❌ 아니오'}
-- 웹 검색 요청됨: {'✅ 예' if web_search_requested else '❌ 아니오'}
+보고서:
+- 생성됨: {bool(report_ready)}
 
-[보고서 상태]
-- 보고서 생성 완료: {'✅ 예' if report_ready else '❌ 아니오'}
-
-[DOCX 상태]
-- DOCX 파일 생성 완료: {'✅ 예' if docx_ready else '❌ 아니오'}
-
-[다음 Agent 선택 규칙]
-**user_intent가 "search_only"인 경우:**
-1. RAG 검색이 안 되었으면 → RAGAgent
-2. 웹 검색이 요청되었고 완료 안 되었으면 → WebSearchAgent
-3. 모두 완료되었으면 → END
-
-**user_intent가 "generate_report"인 경우:**
-1. RAG 검색이 안 되었으면 → RAGAgent
-2. RAG 결과가 부족하고(<3개) 웹 검색 미완료면 → WebSearchAgent
-3. 검색 완료되었지만 보고서 없으면 → ReportWriterAgent
-4. 보고서 있지만 DOCX 없으면 → ReportWriterAgent
-5. 모두 완료되었으면 → END
-
-**중요: WebSearchAgent는 다음 경우에만 호출**
-- RAG 검색 결과가 3개 미만
-- 사용자가 명시적으로 웹 검색 요청 (web_search_requested=True)
-- 최신 정보가 필요한 경우
+DOCX:
+- 생성됨: {bool(docx_ready)}
 """
         return summary
 
-
+    # ===========================
+    #  다음 Agent 결정 (LLM)
+    # ===========================
     def decide_next_agent(self, state: AgentState) -> Optional[str]:
-        """LLM을 사용하여 다음 Agent 결정 (user_intent 기반)"""
-        
+        # 이미 STOP 상태면 아무것도 하지 않음
+        if state.get("wait_for_user", False):
+            print("\n⏸ STOP 상태: 사용자 입력 대기 중...")
+            return None
+
         state_summary = self._create_state_summary(state)
 
         system_message = {
             "role": "system",
             "content": """
-당신은 Multi-Agent 시스템의 Orchestrator입니다.
+당신은 Multi-Agent Orchestrator입니다.
 
-선택 가능한 Agent:
-- RAGAgent: 문서 검색
-- ReportWriterAgent: 보고서 작성, 웹검색, DOCX 생성
-- END: 모든 작업 완료
+search_only:
+- RAGAgent로 검색만 수행
+- 검색이 완료되면 보고서/웹검색/END를 호출하지 말고 멈춥니다.
 
-**중요: user_intent를 반드시 확인하세요!**
+generate_report:
+- 기본 플로우: RAGAgent → (필요 시 WebSearchAgent) → ReportWriterAgent
+- ReportWriterAgent는 보고서 생성 및 DOCX 생성을 담당합니다.
 
-user_intent가 "search_only"이면:
-- RAG 검색만 하고 바로 END
-
-user_intent가 "generate_report"이면:
-- 기존대로 RAG → ReportWriter → END
-
-반드시 tool calling 형식으로 응답하세요.
-"""
+반드시 tool-calling 형식으로만 응답하세요.
+            """
         }
 
         user_message = {"role": "user", "content": state_summary}
 
         try:
-            print("\n🧠 [Orchestrator] 다음 Agent 결정 중...")
-            print(state_summary)
-
             response = call_llm_with_tools(
                 messages=[system_message, user_message],
                 tools=self.tools,
@@ -187,98 +141,106 @@ user_intent가 "generate_report"이면:
                 tool_call = response.tool_calls[0]
                 agent_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                reason = args.get("reason", "")
-
-                print(f"✅ 결정된 Agent: {agent_name}")
-                print(f"💡 이유: {reason}")
+                print(f"✅ LLM 결정 Agent: {agent_name} / 이유: {args.get('reason','')}")
                 return agent_name
-            else:
-                print("⚠️ LLM tool 호출 실패 → fallback 사용")
-                return self._fallback_decision(state)
+
+            print("⚠️ LLM tool-call 없음 → fallback 사용")
+            return self._fallback_decision(state)
 
         except Exception as e:
             print(f"❌ Orchestrator 오류: {e}")
             return self._fallback_decision(state)
 
-
-    def _fallback_decision(self, state: AgentState) -> str:
-        """
-        Tool calling 실패 시 Rule-based fallback
-        user_intent 및 웹 검색 요청 기반으로 판단
-        """
-        print("\n" + "⚠️ " * 40)
-        print("⚠️  FALLBACK 모드 활성화 - LLM 판단 실패로 Rule-based 로직 사용")
-        print("⚠️ " * 40)
-        
+    # ===========================
+    #  Fallback 로직
+    # ===========================
+    def _fallback_decision(self, state: AgentState) -> Optional[str]:
         user_intent = state.get("user_intent", "generate_report")
-        web_search_requested = state.get("web_search_requested", False)
-        web_search_done = state.get("web_search_completed", False)
-        retrieved_docs = state.get("retrieved_docs", [])
-        
-        # search_only 모드
+        retrieved = state.get("retrieved_docs", [])
+        web_req = state.get("web_search_requested", False)
+        web_done = state.get("web_search_completed", False)
+
+        # search_only 모드: RAG만 돌리고 STOP
         if user_intent == "search_only":
-            if not retrieved_docs:
-                print("📌 [Fallback Rule - search_only] RAG 검색 필요 → RAGAgent 선택")
+            if not retrieved:
+                print("📌 [fallback] search_only: RAG 필요")
                 return "RAGAgent"
-            elif web_search_requested and not web_search_done:
-                print("📌 [Fallback Rule - search_only] 웹 검색 요청됨 → WebSearchAgent 선택")
-                return "WebSearchAgent"
-            else:
-                print("📌 [Fallback Rule - search_only] 검색 완료 → END 선택")
-                return "END"
-        
-        # generate_report 모드 (기존 로직 + 웹 검색)
-        if not retrieved_docs:
-            print("📌 [Fallback Rule 1] RAG 검색 필요 → RAGAgent 선택")
+            print("📌 [fallback] search_only: RAG 완료 → STOP")
+            return None
+
+        # generate_report 모드
+        if not retrieved:
+            print("📌 [fallback] generate_report: 우선 RAGAgent")
             return "RAGAgent"
-        
-        # RAG 결과가 부족하고 웹 검색이 안 되었으면 웹 검색
-        if len(retrieved_docs) < 3 and not web_search_done:
-            print("📌 [Fallback Rule 2] RAG 결과 부족(<3개) → WebSearchAgent 선택")
+
+        if len(retrieved) < 3 and not web_done:
+            print("📌 [fallback] 문서 적음 → WebSearchAgent")
             return "WebSearchAgent"
-        
-        # 사용자가 웹 검색 요청했는데 안 되었으면
-        if web_search_requested and not web_search_done:
-            print("📌 [Fallback Rule 3] 웹 검색 요청됨 → WebSearchAgent 선택")
+
+        if web_req and not web_done:
+            print("📌 [fallback] 사용자가 웹검색 요청 → WebSearchAgent")
             return "WebSearchAgent"
-        
+
         if not state.get("report_text"):
-            print("📌 [Fallback Rule 4] 보고서 필요 → ReportWriterAgent 선택")
+            print("📌 [fallback] 보고서 없음 → ReportWriterAgent")
             return "ReportWriterAgent"
-        
+
         if not state.get("docx_path"):
-            print("📌 [Fallback Rule 5] DOCX 필요 → ReportWriterAgent 선택")
+            print("📌 [fallback] DOCX 없음 → ReportWriterAgent")
             return "ReportWriterAgent"
-        
-        print("📌 [Fallback Rule 6] 모든 작업 완료 → END 선택")
-        return "END"
 
+        print("📌 [fallback] 모든 작업 완료 → 종료")
+        return None
 
+    # ===========================
+    #  Orchestrator 실행
+    # ===========================
     def run(self, state: AgentState) -> AgentState:
-        """Orchestrator 실행: 다음 Agent 결정 및 실행"""
-        
+        user_intent = state.get("user_intent", "generate_report")
+
+        # ✅ Rule 1: search_only + RAG 완료 → 여기서 강제 STOP
+        if (
+            user_intent == "search_only"
+            and state.get("route") == "retrieve_complete"
+            and state.get("retrieved_docs")
+        ):
+            print("\n################################################################################")
+            print("📌 [Rule] search_only: RAG 완료 → STOP (사용자 입력 대기)")
+            print("################################################################################")
+            state["wait_for_user"] = True
+            # is_complete 는 False → 나중에 보고서 생성/종료 선택 가능
+            return state
+
+        # ✅ Rule 2: generate_report 모드에서 report + docx 둘 다 있으면 종료
+        if (
+            user_intent == "generate_report"
+            and state.get("report_text")
+            and state.get("docx_path")
+        ):
+            print("\n🎉 모든 작업 완료! (보고서 + DOCX 생성 완료)")
+            state["is_complete"] = True
+            return state
+
+        # 그 외에는 LLM/Rule 기반으로 다음 Agent 선택
+        print("\n🧠 [Orchestrator] 다음 Agent 결정 중...")
         next_agent = self.decide_next_agent(state)
 
-        if next_agent == "END":
+        # next_agent 가 None이면 → 더 할 일 없음 (완료로 처리)
+        if next_agent is None:
+            print("\nℹ️ 실행할 Agent가 없습니다. 워크플로우를 종료합니다.")
             state["is_complete"] = True
-            print("\n🎉 모든 작업 완료!")
             return state
 
         agent = get_agent(next_agent)
-        if agent is None:
-            print(f"❌ '{next_agent}' Agent를 찾을 수 없습니다.")
+        if not agent:
+            print(f"❌ Agent '{next_agent}'를 찾을 수 없음 → 강제 종료")
             state["is_complete"] = True
             return state
 
-        # Agent 호출 전에 구분선 출력
-        print(f"\n{'='*80}")
-        print(f"▶️  다음 실행: {next_agent}")
-        print(f"{'='*80}")
-        
+        print(f"\n▶️ 다음 실행: {next_agent}")
         state["next_agent"] = next_agent
-        state = agent.run(state)
 
-        return state
+        return agent.run(state)
 
 
 # 전역 인스턴스

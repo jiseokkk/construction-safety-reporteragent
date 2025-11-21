@@ -471,7 +471,11 @@ class RAGAgent:
         state["route"] = "retrieve_complete"
 
         print(f"\n✅ RAGAgent 검색 완료! (총 {len(final_docs)}개 문서)")
-        return state
+        user_intent = state.get("user_intent", "generate_report")
+        if user_intent == "search_only":
+            state["wait_for_user"] = True   # 그래프 STOP
+            # is_complete 는 False → 나중에 이어서 사용
+            return state
 
 
 # ========================================
@@ -550,32 +554,36 @@ class ReportWriterAgent:
 1. web_search
    - Tavily 웹 검색으로 부족한 정보 보완
    - RAG 결과가 부족하거나(3개 미만) 최신 정보가 필요할 때만 수행
-   - ⚠️ 중요: 이미 웹 검색이 완료되었다면 절대 다시 수행하지 마세요
+   - ⚠️ 이미 웹 검색이 완료된 경우 절대 재실행하지 마세요
 
 2. final_report
    - RAG/웹검색 결과로 사고 보고서 생성
-   - 보고서가 없을 때 반드시 수행
+   - 보고서(report_text)가 없을 때 반드시 수행
 
 3. create_docx
    - 보고서를 DOCX 파일로 변환
-   - 보고서가 있지만 DOCX가 없을 때 수행
+   - ⚠️ 보고서가 존재하고(docx_path 없음) 경우 반드시 create_docx 선택
+   - ⚠️ final_report 수행 이후 반드시 이어서 create_docx가 호출됨
 
 4. noop
-   - 모든 작업 완료 시에만 선택
+   - 보고서 + DOCX가 모두 존재할 때만 선택
+
 </available_actions>
 
 <decision_rules>
-1. 웹 검색 완료 여부를 반드시 확인하세요
-2. 작업 순서: 보고서 없음 → final_report, DOCX 없음 → create_docx, 완료 → noop
-3. 웹 검색은 매우 선택적으로만 수행
+1. 웹 검색 완료 여부 확인
+2. 보고서가 없으면 → final_report
+3. 보고서 있음 + DOCX 없음 → 반드시 create_docx
+4. 보고서 있음 + DOCX 있음 → noop
+5. web_search는 특별한 경우만 수행
 </decision_rules>
 
 <output_format>
 <thinking>
-1) 웹 검색 완료 여부 확인
-2) 보고서 존재 여부 확인
+1) 웹 검색 상태 확인
+2) 보고서 생성 여부 확인
 3) DOCX 존재 여부 확인
-4) 다음 작업 결정
+4) 다음 액션 하나 선택
 </thinking>
 
 <o>
