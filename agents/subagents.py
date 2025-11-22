@@ -73,10 +73,9 @@ def should_enable_feedback(state: AgentState, docs: List = None) -> bool:
     
     우선순위:
     1. 사용자 명시 → 그대로 따름
-    2. 보고서 생성 → 항상 확인
+    2. 보고서 생성 / search_only → 기본적으로 HITL
     3. 심각한 사고 → 항상 확인
     4. 검색 품질 낮음 → 확인
-    5. 단순 검색 → 확인 안 함
     """
     
     # 1. 사용자가 명시적으로 설정했으면 우선
@@ -87,14 +86,13 @@ def should_enable_feedback(state: AgentState, docs: List = None) -> bool:
     user_intent = state.get("user_intent", "generate_report")
     
     if user_intent == "csv_info":
-        return False  # CSV 조회는 필요 없음
+        # CSV 조회는 필요 없음
+        return False  
     
     elif user_intent == "search_only":
-        # 검색 품질 확인
-        if docs and len(docs) < 3:
-            print("⚠️ 판단: 검색 결과 부족 → Human-in-the-Loop 활성화")
-            return True
-        return False  # 단순 검색은 기본적으로 자동
+        # 🔥 변경 포인트: search_only 도 항상 HITL + AdvancedDocumentProcessor 사용
+        print("ℹ️ 판단: search_only 모드 → Human-in-the-Loop 활성화")
+        return True
     
     elif user_intent == "generate_report":
         # 보고서는 사고 심각도 확인
@@ -106,13 +104,11 @@ def should_enable_feedback(state: AgentState, docs: List = None) -> bool:
             print(f"⚠️ 판단: 심각한 사고 ({accident_type}) → Human-in-the-Loop 활성화")
             return True
         
-        # 보고서는 기본적으로 확인하는 게 안전
         print("ℹ️ 판단: 보고서 생성 → Human-in-the-Loop 활성화")
         return True
     
     # 3. 기본값: 안전하게 확인
     return True
-
 
 # ========================================
 # 1. RAGAgent - 문서 검색 (Human-in-the-Loop 통합)
@@ -351,6 +347,11 @@ class RAGAgent:
                         self.available_dbs
                     )
                 )
+                # 🔁 Human-in-the-Loop 루프 종료 후, AdvancedDocumentProcessor 결과를 반영
+                if processed_results:
+                    # AdvancedDocumentProcessor가 정리한 순서/중복제거 결과를 그대로 사용
+                    print(f"\n✅ AdvancedDocumentProcessor 결과 반영: {len(processed_results)}개 문서")
+                    final_docs = [r["doc"] for r in processed_results]
                 
                 # ✅ 웹 검색 요청 처리 (신규)
                 if feedback.get("web_search_requested", False):
