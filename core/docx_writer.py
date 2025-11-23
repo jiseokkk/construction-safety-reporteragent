@@ -257,7 +257,7 @@ def create_accident_report_docx(
             # 위치 정보
             if ref.get("hierarchy"):
                 loc_para = merged_cell.add_paragraph()
-                loc_run1 = loc_para.add_run('📍 위치: ')
+                loc_run1 = loc_para.add_run(' 위치: ')
                 loc_run1.font.size = Pt(8)
                 loc_run1.font.bold = True
                 loc_run2 = loc_para.add_run(ref["hierarchy"])
@@ -265,7 +265,7 @@ def create_accident_report_docx(
                 loc_para.paragraph_format.space_after = Pt(2)
             elif ref.get("section"):
                 loc_para = merged_cell.add_paragraph()
-                loc_run1 = loc_para.add_run('📍 섹션: ')
+                loc_run1 = loc_para.add_run(' 섹션: ')
                 loc_run1.font.size = Pt(8)
                 loc_run1.font.bold = True
                 loc_run2 = loc_para.add_run(ref["section"])
@@ -275,7 +275,7 @@ def create_accident_report_docx(
             # 관련성 요약
             if ref.get("relevance_summary"):
                 rel_para = merged_cell.add_paragraph()
-                rel_run1 = rel_para.add_run('💡 관련성: ')
+                rel_run1 = rel_para.add_run(' 관련성: ')
                 rel_run1.font.size = Pt(8)
                 rel_run1.font.bold = True
                 rel_run2 = rel_para.add_run(ref["relevance_summary"])
@@ -286,7 +286,7 @@ def create_accident_report_docx(
             key_sentences = ref.get("key_sentences", [])
             if key_sentences:
                 key_para = merged_cell.add_paragraph()
-                key_run = key_para.add_run('🎯 핵심 내용:')
+                key_run = key_para.add_run(' 핵심 내용:')
                 key_run.font.size = Pt(8)
                 key_run.font.bold = True
                 key_para.paragraph_format.space_after = Pt(2)

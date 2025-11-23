@@ -1,12 +1,4 @@
-"""
-Human Feedback Collector (Chainlit 전용)
-RAG 검색 결과에 대한 사용자 피드백을 Chainlit UI로 수집
-
-✅ Chainlit 네이티브 방식
-✅ wrapper 불필요
-"""
-
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from langchain_core.documents import Document
 from core.advanced_document_processor import AdvancedDocumentProcessor
 import chainlit as cl
@@ -18,7 +10,7 @@ class HumanFeedbackCollector:
     def __init__(self, enable_advanced_processing: bool = True):
         self.feedback_history = []
         self.enable_advanced_processing = enable_advanced_processing
-        self.processor = AdvancedDocumentProcessor() if enable_advanced_processing else None
+        self.processor = AdvancedDocumentProcessor() if enable_advanced_processing else None 
     
     async def process(
         self, 
@@ -28,14 +20,6 @@ class HumanFeedbackCollector:
     ) -> Tuple[List[Document], Dict[str, Any]]:
         """
         검색된 문서에 대한 사용자 피드백 수집 및 처리 (Chainlit UI)
-        
-        Args:
-            docs: 검색된 Document 리스트
-            query: 원본 쿼리
-            available_dbs: 사용 가능한 DB 리스트
-        
-        Returns:
-            (필터링된 문서 리스트, 피드백 정보)
         """
         
         if not docs:
@@ -58,14 +42,14 @@ class HumanFeedbackCollector:
         # 1) 문서 미리보기 (Chainlit UI)
         await self._preview_documents_chainlit(docs, processed_results)
         
-        # 2) 사용자 선택 (Chainlit UI)
-        action = await self._get_user_action_chainlit()
+        # 2) 사용자 선택 (Chainlit UI) - 🔑 버튼 기반 로직
+        action = await self._get_user_action_chainlit_button()
         
-        if action == "1":  # 모두 사용
+        if action == "accept_all":  # 모두 사용
             await cl.Message(content="✅ 모든 문서를 사용하여 진행합니다.").send()
             return docs, {"action": "accept_all", "count": len(docs), "web_search_requested": False}
         
-        elif action == "2":  # 일부 선택
+        elif action == "select_partial":  # 일부 선택
             selected_docs = await self._select_documents_chainlit(docs)
             if selected_docs:
                 await cl.Message(content=f"✅ {len(selected_docs)}개 문서를 선택했습니다.").send()
@@ -74,7 +58,7 @@ class HumanFeedbackCollector:
                 await cl.Message(content="⚠️ 선택된 문서가 없습니다. 모든 문서를 사용합니다.").send()
                 return docs, {"action": "accept_all", "count": len(docs), "web_search_requested": False}
         
-        elif action == "3":  # 키워드 추가 재검색
+        elif action == "research_keyword":  # 키워드 추가 재검색
             additional_keywords = await self._get_additional_keywords_chainlit()
             return docs, {
                 "action": "research_keyword",
@@ -83,7 +67,7 @@ class HumanFeedbackCollector:
                 "web_search_requested": False
             }
         
-        elif action == "4":  # DB 변경 재검색
+        elif action == "research_db":  # DB 변경 재검색
             new_dbs = await self._select_databases_chainlit(available_dbs)
             return docs, {
                 "action": "research_db",
@@ -92,7 +76,7 @@ class HumanFeedbackCollector:
                 "web_search_requested": False
             }
         
-        elif action == "5":  # 웹 검색
+        elif action == "web_search":  # 웹 검색
             await cl.Message(content="✅ 웹 검색을 요청하셨습니다.").send()
             return docs, {
                 "action": "accept_all",
@@ -100,14 +84,110 @@ class HumanFeedbackCollector:
                 "web_search_requested": True
             }
         
-        else:
-            await cl.Message(content="⚠️ 잘못된 선택입니다. 모든 문서를 사용합니다.").send()
+        else:  # 취소/시간 초과 등
+            await cl.Message(content="⚠️ 선택이 취소되었습니다. 모든 문서를 사용합니다.").send()
             return docs, {"action": "accept_all", "count": len(docs), "web_search_requested": False}
+    
+    # ------------------------------------------------------------
+    # 🔑 수정된 버튼 기반 사용자 선택 메서드
+    # ------------------------------------------------------------
+    async def _get_user_action_chainlit_button(self) -> Optional[str]:
+        """사용자 행동 선택 (Chainlit UI - 버튼 기반 AskActionMessage)"""
+        
+        # ✅ payload 필드 추가!
+        actions = [
+            cl.Action(
+                name="action_1", 
+                value="accept_all", 
+                label="1️⃣ 모두 사용하여 진행", 
+                description="검색된 문서를 모두 활용하여 다음 단계로 넘어갑니다.",
+                payload={"action": "accept_all"}
+            ),
+            cl.Action(
+                name="action_2", 
+                value="select_partial", 
+                label="2️⃣ 일부 문서만 선택", 
+                description="문서 번호를 직접 지정하여 필터링합니다.",
+                payload={"action": "select_partial"}
+            ),
+            cl.Action(
+                name="action_3", 
+                value="research_keyword", 
+                label="3️⃣ 키워드 추가 재검색", 
+                description="새 키워드를 추가하여 RAG 검색을 다시 수행합니다.",
+                payload={"action": "research_keyword"}
+            ),
+            cl.Action(
+                name="action_4", 
+                value="research_db", 
+                label="4️⃣ 다른 DB에서 재검색", 
+                description="현재 DB가 아닌 다른 DB를 선택하여 다시 검색합니다.",
+                payload={"action": "research_db"}
+            ),
+            cl.Action(
+                name="action_5", 
+                value="web_search", 
+                label="5️⃣ 웹 검색 추가 (Tavily)", 
+                description="내부 문서와 함께 웹 검색 결과를 추가로 요청합니다.",
+                payload={"action": "web_search"}
+            ),
+        ]
+        
+        # 🔑 cl.AskActionMessage를 사용하여 사용자 응답 대기
+        res = await cl.AskActionMessage(
+            content="**💬 다음 작업을 선택해주세요.**", 
+            actions=actions, 
+            timeout=180  # 3분 대기
+        ).send()
+        
+        if res:
+            # 🔑 여러 방법으로 action 추출 시도
+            print(f"DEBUG: res = {res}")
+            print(f"DEBUG: res type = {type(res)}")
+            
+            # 방법 1: value에서 추출 (가장 확실)
+            action = res.get("value")
+            if action:
+                print(f"DEBUG: Action from value = {action}")
+                return action
+            
+            # 방법 2: payload에서 추출
+            if isinstance(res, dict):
+                action = res.get("payload", {}).get("action")
+                if action:
+                    print(f"DEBUG: Action from payload = {action}")
+                    return action
+                
+                # 방법 3: name에서 추출
+                name = res.get("name", "")
+                if name.startswith("action_"):
+                    action_map = {
+                        "action_1": "accept_all",
+                        "action_2": "select_partial",
+                        "action_3": "research_keyword",
+                        "action_4": "research_db",
+                        "action_5": "web_search"
+                    }
+                    action = action_map.get(name)
+                    if action:
+                        print(f"DEBUG: Action from name = {action}")
+                        return action
+            
+            # 방법 4: 문자열로 직접 반환된 경우
+            elif isinstance(res, str):
+                print(f"DEBUG: Action from string = {res}")
+                return res
+        
+        print("DEBUG: No action found, returning None")
+        return None  # 시간 초과 또는 취소
+        
+    # ------------------------------------------------------------
+    # 나머지 헬퍼 메서드는 유지됩니다.
+    # ------------------------------------------------------------
     
     async def _preview_documents_chainlit(self, docs: List[Document], processed_results: List[Dict] = None):
         """검색된 문서 미리보기 (Chainlit UI)"""
         
-        # 헤더
         header = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📚 **RAG 검색 결과 (Human-in-the-Loop + Phase 3 고급 처리)**
@@ -185,167 +265,7 @@ class HumanFeedbackCollector:
         
         # 푸터
         await cl.Message(content="━" * 80).send()
-    
-    async def _get_user_action_chainlit(self) -> str:
-        """사용자 행동 선택 (Chainlit UI - LLM 의도 파악)"""
-        
-        # 선택지 안내
-        await cl.Message(content="""
-**💬 다음 작업을 원하시나요?**
 
-   [1] 모든 문서 사용하여 진행
-   [2] 일부 문서만 선택
-   [3] 키워드 추가하여 재검색
-   [4] 다른 DB에서 재검색
-   [5] 웹 검색 추가 (Tavily)
-
-💡 **자유롭게 말씀해주세요!**
-   예: "웹에서도 찾아봐", "이 문서들로 진행", "키워드 추가할게" 등
-""").send()
-        
-        # 사용자 입력 받기
-        res = await cl.AskUserMessage(
-            content="**입력:**",
-            timeout=180
-        ).send()
-        
-        if res:
-            user_input = res["output"].strip()
-            
-            # ✅ LLM으로 의도 파악
-            choice = await self._parse_user_intent_with_llm(user_input)
-            
-            # 선택 확인 메시지
-            choice_labels = {
-                "1": "모든 문서 사용",
-                "2": "일부 문서 선택",
-                "3": "키워드 추가 재검색",
-                "4": "DB 변경 재검색",
-                "5": "웹 검색 추가"
-            }
-            
-            if choice in choice_labels:
-                await cl.Message(content=f"✅ **파악된 의도:** [{choice}] {choice_labels[choice]}").send()
-            
-            return choice
-        
-        return "1"  # 기본값
-    
-    async def _parse_user_intent_with_llm(self, user_input: str) -> str:
-        """
-        LLM을 사용하여 사용자 의도 파악
-        
-        Args:
-            user_input: 사용자의 자연어 입력
-        
-        Returns:
-            선택지 번호 ("1", "2", "3", "4", "5")
-        """
-        from core.llm_utils import call_llm
-        import json
-        
-        system_prompt = """
-당신은 사용자의 의도를 파악하는 AI입니다.
-
-사용자가 RAG 검색 결과를 보고 다음 중 하나를 선택하려고 합니다:
-
-1. 모든 문서 사용하여 진행
-2. 일부 문서만 선택
-3. 키워드 추가하여 재검색
-4. 다른 DB에서 재검색
-5. 웹 검색 추가 (Tavily)
-
-사용자의 입력을 분석하여 어떤 선택지를 원하는지 파악하세요.
-
-## 입력 예시와 결과:
-- "1" → 1
-- "웹에서도 찾아봐" → 5
-- "이 문서들로 진행" → 1
-- "몇 개만 골라서 쓸게" → 2
-- "키워드 추가할게" → 3
-- "다른 DB에서 검색" → 4
-- "인터넷도 검색해줘" → 5
-- "tavily 써봐" → 5
-- "전부 사용" → 1
-- "재검색" → 3
-
-## 출력 형식 (JSON):
-{{
-  "choice": "1",
-  "reason": "사용자가 모든 문서를 사용하겠다는 의도"
-}}
-
-숫자만 출력하지 말고 반드시 위 JSON 형식을 따르세요.
-"""
-        
-        user_message = f"사용자 입력: {user_input}"
-        
-        try:
-            # LLM 호출 (비동기)
-            import asyncio
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: call_llm(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ],
-                    temperature=0.0,
-                    max_tokens=200
-                )
-            )
-            
-            # JSON 파싱
-            if "{" in response and "}" in response:
-                start = response.index("{")
-                end = response.rindex("}") + 1
-                json_str = response[start:end]
-                parsed = json.loads(json_str)
-                
-                choice = parsed.get("choice", "1")
-                reason = parsed.get("reason", "")
-                
-                print(f"\n🤖 LLM 의도 파악: choice={choice}, reason={reason}")
-                
-                # 유효성 검사
-                if choice in ["1", "2", "3", "4", "5"]:
-                    return choice
-            
-        except Exception as e:
-            print(f"⚠️ LLM 의도 파악 실패: {e}")
-            # fallback: 키워드 기반 파싱
-            return self._parse_user_choice_fallback(user_input)
-        
-        return "1"
-    
-    def _parse_user_choice_fallback(self, user_input: str) -> str:
-        """
-        LLM 실패 시 fallback: 키워드 기반 파싱
-        """
-        user_input = user_input.strip().lower()
-        
-        # 숫자 직접 입력
-        if user_input in ["1", "2", "3", "4", "5"]:
-            return user_input
-        
-        # 키워드 매칭
-        if any(keyword in user_input for keyword in ["웹", "web", "인터넷", "tavily", "온라인"]):
-            return "5"
-        
-        if any(keyword in user_input for keyword in ["모든", "전체", "모두", "all"]):
-            return "1"
-        
-        if any(keyword in user_input for keyword in ["일부", "선택", "골라"]):
-            return "2"
-        
-        if any(keyword in user_input for keyword in ["키워드", "재검색", "추가검색"]):
-            return "3"
-        
-        if any(keyword in user_input for keyword in ["db", "데이터베이스", "디비"]):
-            return "4"
-        
-        return "1"
-    
     async def _select_documents_chainlit(self, docs: List[Document]) -> List[Document]:
         """사용자가 문서 선택 (Chainlit UI)"""
         

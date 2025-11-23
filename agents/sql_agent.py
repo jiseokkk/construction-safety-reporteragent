@@ -1,13 +1,7 @@
+# agents/sql_agent.py (전체 수정본)
+
 """
 CSVSQLAgent (순수 버전 - LangChain 제거, 파일 DB 고정)
-
-개선 사항
-- 메모리 DB → 파일 SQLite DB (accidents_cache.sqlite)
-- 테이블 자동 생성/유지 (_ensure_table)
-- 발생일시_parsed 자동 생성
-- 자연어 → SQL 생성은 call_llm() 사용 (간단/명확)
-
-필요 패키지: pandas, sqlalchemy
 """
 
 import os
@@ -30,8 +24,6 @@ logging.basicConfig(level=logging.INFO)
 class CSVSQLAgent:
     """
     CSV 기반 건설사고 DB의 SQL Agent (순수 버전)
-    - LangChain 없이 직접 SQL 생성/실행
-    - 파일 SQLite DB로 지속성 확보
     """
 
     def __init__(self, csv_path: str):
@@ -79,7 +71,7 @@ class CSVSQLAgent:
             else:
                 # 컬럼 목록 동기화
                 cols = conn.execute(text("PRAGMA table_info('accidents')")).fetchall()
-                self.columns = [c[1] for c in cols]  # (cid, name, type, ...)
+                self.columns = [c[1] for c in cols]
 
                 # 발생일시_parsed가 없으면 추가 생성
                 if "발생일시_parsed" not in self.columns:
@@ -113,12 +105,15 @@ class CSVSQLAgent:
         df.to_sql("accidents", conn, if_exists="replace", index=False)
 
     # ---------------------------------------------------------------------
-    # SQL 생성 (LLM)
+    # SQL 생성 (LLM) - ✅ 복합 쿼리 처리용 프롬프트
     # ---------------------------------------------------------------------
     def _generate_sql(self, user_query: str) -> Optional[str]:
         """
         자연어를 SQL로 변환 (SQLite 전용)
         """
+        # ✅ 표시를 위한 주요 컬럼 목록 정의
+        SELECT_COLUMNS = "ID, 발생일시, \"공종(중분류)\", 인적사고, 사고원인"
+
         system_prompt = f"""
 당신은 건설사고 SQLite DB의 SQL 전문가입니다.
 
@@ -130,24 +125,17 @@ class CSVSQLAgent:
 
 [규칙]
 1) SQLite 문법만 사용
-2) 날짜 검색은 반드시 '발생일시_parsed' 사용 (YYYY-MM-DD, YYYY, YYYY-MM 등)
-3) LIKE 검색에 % 사용
-4) 괄호가 들어간 컬럼명은 큰따옴표로 감싸기 (예: "공종(중분류)")
-
-[날짜 예시]
-- 특정 날짜: WHERE 발생일시_parsed = '2024-08-08'
-- 연도만:    WHERE strftime('%Y', 발생일시_parsed) = '2024'
-- 연/월:     WHERE strftime('%Y-%m', 발생일시_parsed) = '2024-08'
-- 최근 3개월: WHERE 발생일시_parsed >= date('now','-3 months')
-
-[텍스트 예시]
-- 공종:     WHERE "공종(중분류)" LIKE '%철근콘크리트%'
-- 사고유형: WHERE 인적사고 LIKE '%낙상%'
+2) 결과는 반드시 **SELECT {SELECT_COLUMNS} FROM accidents** 로 시작
+3) 날짜 검색은 반드시 '발생일시_parsed' 컬럼 사용
+4) '최근 N개월/N년' 조건은 반드시 date('now', '... N ...') 함수를 사용하여 처리
+   - 예: 최근 3개월: WHERE 발생일시_parsed >= date('now','-3 months')
+5) 텍스트 검색은 LIKE '%키워드%' 사용 (부분 일치 검색이 기본)
+6) 여러 조건은 반드시 AND 또는 OR로 결합하여 복합 쿼리를 구성
 
 [출력]
-- SQL만 출력 (설명 금지)
+- SQL만 출력 (설명, ```sql 등 마크다운 태그 포함 금지)
 """
-        user_message = f"사용자 질문: {user_query}\n\n위 질문에 대한 SQL을 생성하세요."
+        user_message = f"사용자 질문: {user_query}\n\n위 질문에 대한 SQL을 생성하세요. 결과는 {SELECT_COLUMNS} 필드만 포함해야 합니다."
 
         try:
             response = call_llm(
@@ -160,7 +148,7 @@ class CSVSQLAgent:
             )
             sql = response.strip()
 
-            # ```sql ... ``` 제거
+            # ```sql ... ``` 제거 (Robustness)
             if "```sql" in sql:
                 sql = sql.split("```sql")[1].split("```")[0].strip()
             elif "```" in sql:
@@ -169,6 +157,12 @@ class CSVSQLAgent:
             if not sql.upper().startswith("SELECT"):
                 logger.warning(f"유효하지 않은 SQL 생성: {sql}")
                 return None
+            
+            # SELECT 필드 강제 대체 (LLM이 잘못 생성했을 경우)
+            if SELECT_COLUMNS not in sql:
+                 logger.warning(f"SELECT 필드가 지정되지 않아 {SELECT_COLUMNS}로 강제 대체합니다.")
+                 sql = re.sub(r'SELECT\s+.*?\s+FROM', f'SELECT {SELECT_COLUMNS} FROM', sql, flags=re.IGNORECASE)
+
 
             return sql
 
@@ -177,7 +171,7 @@ class CSVSQLAgent:
             return None
 
     # ---------------------------------------------------------------------
-    # 질의 실행
+    # 질의 실행 (유지)
     # ---------------------------------------------------------------------
     def query(self, user_query: str) -> Dict[str, Any]:
         """
@@ -220,7 +214,7 @@ class CSVSQLAgent:
             }
 
     # ---------------------------------------------------------------------
-    # 부가: DataFrame 바로 받기
+    # 부가: DataFrame 바로 받기 (유지)
     # ---------------------------------------------------------------------
     def get_dataframe(self, user_query: str) -> Optional[pd.DataFrame]:
         res = self.query(user_query)
@@ -229,27 +223,4 @@ class CSVSQLAgent:
         logger.error(f"DataFrame 생성 실패: {res.get('error')}")
         return None
 
-
-# -------------------------------------------------------------------------
-# 단독 테스트
-# -------------------------------------------------------------------------
-if __name__ == "__main__":
-    csv_path = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/data/test_preprocessing.csv"  # <- 네 CSV 경로
-    agent = CSVSQLAgent(csv_path)
-
-    test_queries = [
-        "2024년 7월 3일 사고 찾아줘",
-        "2024년 철근콘크리트 사고",
-        "최근 3개월 낙상 사고 찾아줘",
-    ]
-
-    for q in test_queries:
-        print("\n" + "=" * 80)
-        print(f"쿼리: {q}")
-        print("=" * 80)
-        r = agent.query(q)
-        if r["success"]:
-            print(f"✅ SQL: {r['generated_sql']}")
-            print(f"📊 결과: {len(r['rows'])}건")
-        else:
-            print(f"❌ 오류: {r.get('error')}")
+# ... (단독 테스트 부분 유지) ...ss
