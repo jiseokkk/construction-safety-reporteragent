@@ -17,8 +17,8 @@ from langchain_core.documents import Document
 from core.agentstate import AgentState
 from graph.workflow import graph_app
 from core.llm_utils import call_llm
-from agents.intent_agent import IntentAgent 
-from agents.sql_agent import CSVSQLAgent 
+from agents.intent_agent import IntentAgent
+from agents.sql_agent import CSVSQLAgent
 from agents.subagents import RAGAgent
 from core.human_feedback_collector import HumanFeedbackCollector
 
@@ -73,25 +73,25 @@ def row_to_user_query(row: pd.Series) -> str:
 
 def format_csv_details(row: pd.Series) -> str:
     """CSV 상세 정보 포맷 - 최종 수정 버전"""
-    
-    def safe_get(series, key, default='N/A'):
+
+    def safe_get(series, key, default="N/A"):
         try:
-            value = series[key]  # ← 핵심!
-            
+            value = series[key]
+
             if pd.isna(value):
                 return default
-            
+
             if isinstance(value, str):
                 value_stripped = value.strip()
-                if value_stripped == '':
+                if value_stripped == "":
                     return default
                 return value_stripped
-            
+
             return str(value)
-            
-        except (KeyError, AttributeError, IndexError) as e:
+
+        except (KeyError, AttributeError, IndexError):
             return default
-    
+
     return f"""
 ## 📋 사고 상세 정보
 
@@ -132,7 +132,7 @@ async def perform_rag_search_with_hitl(
     user_query: str,
     state: AgentState,
     rag_agent: RAGAgent,
-    feedback_collector: HumanFeedbackCollector
+    feedback_collector: HumanFeedbackCollector,
 ) -> Dict[str, Any]:
 
     # 1) RAG 검색 (HITL 없이 1차 검색)
@@ -178,13 +178,19 @@ async def perform_rag_search_with_hitl(
         last_feedback = feedback or {}
         action = last_feedback.get("action")
 
+        # 근거자료 state에 반영
+        src_refs = last_feedback.get("source_references")
+        if src_refs:
+            state["source_references"] = src_refs
+
         print(f"🔎 [HITL] action = {action}, feedback = {last_feedback}")
 
         # -------------------------------
         # 1) 웹 검색 요청 (웹 검색은 Orchestrator에서 WebSearchAgent로 처리)
         # -------------------------------
         if last_feedback.get("web_search_requested"):
-            # 여기서는 플래그만 반환 → 나중에 state에 넣고 Orchestrator 호출
+            if last_feedback.get("source_references"):
+                state["source_references"] = last_feedback["source_references"]
             return {
                 "success": True,
                 "docs": docs,
@@ -211,11 +217,9 @@ async def perform_rag_search_with_hitl(
                     )
                 except Exception as e:
                     await cl.Message(content=f"❌ 키워드 재검색 오류: {e}").send()
-                    # 실패 시 기존 문서만 사용하고 루프 종료
                     docs = original_docs
                     break
 
-                # 기존 + 신규 문서 합치기 (너무 많아지지 않게 최대 15개)
                 docs = (original_docs or []) + (new_docs or [])
                 docs = docs[:15]
 
@@ -234,7 +238,6 @@ async def perform_rag_search_with_hitl(
                 ).send()
 
                 try:
-                    # RAGAgent의 내부 헬퍼를 그대로 활용
                     structured_query = rag_agent._build_structured_query(state)
                     new_docs = rag_agent._search_documents(
                         db_list=selected_dbs,
@@ -244,7 +247,6 @@ async def perform_rag_search_with_hitl(
                     docs = new_docs[:10]
                 except Exception as e:
                     await cl.Message(content=f"❌ DB 재검색 오류: {e}").send()
-                    # 실패 시 이전 문서 유지
                     pass
 
             feedback_loop_count += 1
@@ -254,7 +256,6 @@ async def perform_rag_search_with_hitl(
         # 4) 문서 확정 (accept_all / select_partial)
         # -------------------------------
         if action in ("accept_all", "select_partial"):
-            # HumanFeedbackCollector가 이미 docs를 확정된 목록으로 넘겨줌
             await cl.Message(
                 content=f"✅ 선택된 문서 {len(docs)}개로 계속 진행합니다."
             ).send()
@@ -270,6 +271,10 @@ async def perform_rag_search_with_hitl(
             ).send()
             break
 
+    # 마지막 피드백의 근거자료 다시 state에 반영
+    if last_feedback.get("source_references"):
+        state["source_references"] = last_feedback["source_references"]
+
     # 3) HITL 종료 → 상위 단계에서 후속 메뉴(보고서 생성/웹검색 등)로 이어짐
     return {
         "success": True,
@@ -284,10 +289,10 @@ async def perform_rag_search_with_hitl(
 # ========================================
 async def continue_to_report(state: AgentState) -> Dict[str, Any]:
     """HITL 완료 후 보고서 생성 계속"""
-    
+
     state["user_intent"] = "generate_report"
     state["wait_for_user"] = False
-    
+
     async with cl.Step(name="📝 보고서 생성 계속", type="run") as step:
         final_state = await cl.make_async(graph_app.invoke)(state)
         step.output = "보고서 생성 완료"
@@ -296,13 +301,13 @@ async def continue_to_report(state: AgentState) -> Dict[str, Any]:
 
 async def display_results(final_state: Dict[str, Any], intent: str):
     """결과 표시"""
-    
+
     if intent == "search_only":
         docs = final_state.get("retrieved_docs") or []
         await cl.Message(
             content=f"📊 검색된 문서 수: **{len(docs)}개** (HITL 완료 후 종료)."
         ).send()
-        
+
     else:  # generate_report
         docs = final_state.get("retrieved_docs") or []
         report_text = final_state.get("report_text", "")
@@ -341,27 +346,46 @@ async def display_results(final_state: Dict[str, Any], intent: str):
 # 사고 선택 및 후속 작업 진행 함수
 # ========================================
 async def handle_accident_selection(
-    df_result: pd.DataFrame, 
-    accident_count: int, 
+    df_result: pd.DataFrame,
+    accident_count: int,
     current_intent: str = "list_view",
-    original_intent: str = "query_sql"
+    original_intent: str = "query_sql",
 ):
     """사고 선택 및 후속 작업 처리"""
-    
-    rag_agent: RAGAgent = cl.user_session.get("rag_agent") 
-    feedback_collector: HumanFeedbackCollector = cl.user_session.get("feedback_collector")
-    
+
+    rag_agent: RAGAgent = cl.user_session.get("rag_agent")
+    feedback_collector: HumanFeedbackCollector = cl.user_session.get(
+        "feedback_collector"
+    )
+
     # 3. 상세 정보 확인 후 후속 작업
     if current_intent == "show_detail":
         accident_data = cl.user_session.get("selected_accident_data")
-        
+
         await cl.Message(content=format_csv_details(accident_data)).send()
 
         actions = [
-            cl.Action(name="rag_search", value="search_only", label="🔍 관련 지침 검색", payload={"action": "search_only"}),
-            cl.Action(name="gen_report", value="generate_report", label="📝 보고서 생성", payload={"action": "generate_report"}),
-            cl.Action(name="back_to_list", value="back_to_list", label="⬅️ 목록으로 돌아가기", payload={"action": "back_to_list"}),
-            cl.Action(name="exit", value="exit", label="❌ 종료", payload={"action": "exit"}),
+            cl.Action(
+                name="rag_search",
+                value="search_only",
+                label="🔍 관련 지침 검색",
+                payload={"action": "search_only"},
+            ),
+            cl.Action(
+                name="gen_report",
+                value="generate_report",
+                label="📝 보고서 생성",
+                payload={"action": "generate_report"},
+            ),
+            cl.Action(
+                name="back_to_list",
+                value="back_to_list",
+                label="⬅️ 목록으로 돌아가기",
+                payload={"action": "back_to_list"},
+            ),
+            cl.Action(
+                name="exit", value="exit", label="❌ 종료", payload={"action": "exit"}
+            ),
         ]
 
         await cl.Message(
@@ -374,15 +398,20 @@ async def handle_accident_selection(
 
         if res:
             action_value = res.get("payload", {}).get("action") or res.get("value")
-            
+
             if action_value == "back_to_list":
                 await cl.Message(content="➡️ 사고 목록으로 돌아갑니다.").send()
-                await handle_accident_selection(df_result, accident_count, current_intent="list_view", original_intent=original_intent)
+                await handle_accident_selection(
+                    df_result,
+                    accident_count,
+                    current_intent="list_view",
+                    original_intent=original_intent,
+                )
                 return
-            
+
             elif action_value in ["search_only", "generate_report"]:
                 user_query = row_to_user_query(accident_data)
-                
+
                 # 🔑 State 생성
                 state: AgentState = {
                     "user_query": user_query,
@@ -391,67 +420,73 @@ async def handle_accident_selection(
                     "accident_type": str(accident_data.get("인적사고", "N/A")),
                     "work_type": str(accident_data.get("공종(중분류)", "N/A")),
                     "work_process": str(accident_data.get("작업프로세스", "N/A")),
-                    "accident_overview": str(accident_data.get("사고원인", "N/A")[:200])
+                    "accident_overview": str(
+                        accident_data.get("사고원인", "N/A")[:200]
+                    ),
                 }
-                
+
                 # 🔑 RAG 검색 + HITL (비동기로 직접 처리)
                 rag_result = await perform_rag_search_with_hitl(
                     user_query=user_query,
                     state=state,
                     rag_agent=rag_agent,
-                    feedback_collector=feedback_collector
+                    feedback_collector=feedback_collector,
                 )
-                                # ==========================================================
+
+                # ==========================================================
                 # 🔥 HITL 종료 후: 무조건 후속 메뉴 제공
                 # ==========================================================
                 if rag_result["success"]:
                     docs = rag_result["docs"]
                     cl.user_session.set("rag_final_docs", docs)
 
+                    # 근거자료 feedback이 있으면 state에 반영
+                    fb = rag_result.get("feedback") or {}
+                    src_refs = fb.get("source_references") or state.get(
+                        "source_references"
+                    )
+                    if src_refs:
+                        state["source_references"] = src_refs
+
                     actions = [
                         cl.Action(
                             name="full_report",
                             value="full_report",
                             label="📝 전체 문서로 보고서 생성",
-                            payload={"action": "full_report"}
+                            payload={"action": "full_report"},
                         ),
                         cl.Action(
                             name="partial_report",
                             value="partial_report",
                             label="✂️ 일부 문서만 선택하여 보고서 생성",
-                            payload={"action": "partial_report"}
+                            payload={"action": "partial_report"},
                         ),
                         cl.Action(
                             name="db_research",
                             value="db_research",
                             label="🗂️ 다른 DB에서 재검색",
-                            payload={"action": "db_research"}
+                            payload={"action": "db_research"},
                         ),
                         cl.Action(
                             name="web_search",
                             value="web_search",
                             label="🌐 웹 검색 추가",
-                            payload={"action": "web_search"}
+                            payload={"action": "web_search"},
                         ),
                         cl.Action(
                             name="exit",
                             value="exit",
                             label="❌ 종료",
-                            payload={"action": "exit"}
+                            payload={"action": "exit"},
                         ),
                     ]
 
-                    # -----------------------------------------------------
-                    # ⚠️ [수정]: cl.Message(actions=...) 대신 AskActionMessage만 사용하여 중복 버튼 제거
-                    # -----------------------------------------------------
                     res = await cl.AskActionMessage(
                         content="🔍 **HITL 완료! 다음 작업을 선택해주세요.**",
                         actions=actions,
-                        timeout=180
+                        timeout=180,
                     ).send()
-                    # -----------------------------------------------------
 
-                    # AskActionMessage 결과에서 선택된 action value 추출 (value/payload/name 모두 처리)
                     if not res:
                         await cl.Message(content="⏹ 작업이 종료되었습니다.").send()
                         return
@@ -463,7 +498,7 @@ async def handle_accident_selection(
                     if not choice:
                         choice = res.get("payload", {}).get("action")
 
-                    # 3) name 기반 (Chainlit이 value/payload를 안 넣는 경우 대비)
+                    # 3) name 기반
                     if not choice:
                         name = res.get("name", "")
                         action_map = {
@@ -473,35 +508,64 @@ async def handle_accident_selection(
                             "web_search": "web_search",
                             "exit": "exit",
                         }
+                            #
                         if name in action_map:
                             choice = action_map[name]
 
                     if not choice:
-                        await cl.Message(content="⏹ 선택이 취소되어 작업을 종료합니다.").send()
+                        await cl.Message(
+                            content="⏹ 선택이 취소되어 작업을 종료합니다."
+                        ).send()
                         return
-
 
                     # === 선택 분기 ===
                     if choice == "full_report":
-                        state["retrieved_docs"] = docs
-                        await cl.Message(content="📝 전체 문서로 보고서를 생성합니다...").send()
-                        # continue_to_report 호출 -> Orchestrator (ReportWriterAgent) 실행
+                        selected_docs = cl.user_session.get(
+                            "rag_final_docs", docs
+                        ) or docs
+                        if not selected_docs:
+                            await cl.Message(
+                                content="⚠ 사용 가능한 문서가 없습니다."
+                            ).send()
+                            return
+
+                        state["retrieved_docs"] = selected_docs
+                        await cl.Message(
+                            content="📝 전체 문서로 보고서를 생성합니다..."
+                        ).send()
                         final_state = await continue_to_report(state)
                         await display_results(final_state, "generate_report")
                         return
 
                     if choice == "partial_report":
-                        await cl.Message(content="✂️ 일부 문서 선택 UI는 아직 준비중입니다.").send()
+                        # 현재 설계에서는 HITL에서 이미 일부 문서를 선택했고,
+                        # rag_final_docs가 그 결과이므로 여기서는 그 문서들만 사용.
+                        selected_docs = cl.user_session.get(
+                            "rag_final_docs", docs
+                        ) or docs
+                        if not selected_docs:
+                            await cl.Message(
+                                content="⚠ 선택된 문서가 없습니다."
+                            ).send()
+                            return
+
+                        state["retrieved_docs"] = selected_docs
+                        await cl.Message(
+                            content=f"✂️ 선택된 {len(selected_docs)}개 문서만 사용해 보고서를 생성합니다..."
+                        ).send()
+                        final_state = await continue_to_report(state)
+                        await display_results(final_state, "generate_report")
                         return
 
                     if choice == "db_research":
-                        await cl.Message(content="🗂️ 다른 DB에서 재검색 기능은 추후 확장 예정입니다.").send()
+                        await cl.Message(
+                            content="🗂️ 다른 DB에서 재검색 기능은 추후 확장 예정입니다."
+                        ).send()
                         return
 
                     if choice == "web_search":
                         await cl.Message(content="🌐 웹 검색을 진행합니다...").send()
                         state["web_search_requested"] = True
-                        # continue_to_report 호출 -> Orchestrator (WebSearchAgent) 실행
                         final_state = await continue_to_report(state)
                         await display_results(final_state, "generate_report")
                         return
@@ -509,87 +573,90 @@ async def handle_accident_selection(
                     if choice == "exit":
                         await cl.Message(content="👋 작업을 종료합니다.").send()
                         return
-                    
-                    # ⚠️ 만약 위의 분기가 아닌 다른 선택(예: 시간 초과)이면 여기서 종료
+
                     await cl.Message(content="⏹ 작업이 종료되었습니다.").send()
                     return
-
 
                 if not rag_result["success"]:
                     await cl.Message(content="❌ RAG 검색에 실패했습니다.").send()
                     return
-                
-                # State에 검색 결과 저장 (이 로직은 HITL 루프가 재검색 요청 없이 끝났을 때만 타야 함)
+
+                # 아래 fallback 로직은 이론상 도달하지 않지만, 예비용으로 유지
                 state["retrieved_docs"] = rag_result["docs"]
-                
-                # search_only면 여기서 종료
+
                 if action_value == "search_only":
                     await cl.Message(content="✅ 검색이 완료되었습니다.").send()
                     return
-                
-                # generate_report면 계속 진행 (이 로직은 위의 HITL 후속 메뉴가 없을 때의 fallback)
+
                 if action_value == "generate_report":
-                    # 웹 검색 요청 처리
                     if rag_result.get("web_search_requested"):
                         state["web_search_requested"] = True
-                    
-                    # 보고서 생성 확인
+
                     confirm_actions = [
-                        cl.Action(name="confirm_yes", value="yes", label="✅ 예, 보고서 생성", payload={"action": "yes"}),
-                        cl.Action(name="confirm_no", value="no", label="❌ 아니오, 취소", payload={"action": "no"}),
+                        cl.Action(
+                            name="confirm_yes",
+                            value="yes",
+                            label="✅ 예, 보고서 생성",
+                            payload={"action": "yes"},
+                        ),
+                        cl.Action(
+                            name="confirm_no",
+                            value="no",
+                            label="❌ 아니오, 취소",
+                            payload={"action": "no"},
+                        ),
                     ]
-                    
+
                     await cl.Message(
                         content="**📝 보고서 생성을 진행하시겠습니까?**",
-                        actions=confirm_actions
+                        actions=confirm_actions,
                     ).send()
-                    
+
                     confirm_res = await cl.AskActionMessage(
                         content="", actions=confirm_actions, timeout=60
                     ).send()
-                    
-                    if confirm_res and confirm_res.get("payload", {}).get("action") == "yes":
-                        await cl.Message(content="📝 **보고서 생성을 시작합니다...**").send()
-                        
-                        # 보고서 생성 (LangGraph 재개)
+
+                    if (
+                        confirm_res
+                        and confirm_res.get("payload", {}).get("action") == "yes"
+                    ):
+                        await cl.Message(
+                            content="📝 **보고서 생성을 시작합니다...**"
+                        ).send()
                         final_state = await continue_to_report(state)
                         await display_results(final_state, "generate_report")
                     else:
                         await cl.Message(content="✅ 작업을 취소합니다.").send()
-                
+
                 return
 
             else:  # exit
                 await cl.Message(content="✅ 작업을 종료합니다.").send()
                 return
-        
+
         else:
             await cl.Message(content="✅ 작업을 종료합니다.").send()
             return
 
-    
     # 1. 목록 제시 및 선택
     elif current_intent == "list_view":
-        display_columns = ['발생일시', '공종(중분류)', '작업프로세스', '인적사고', '사고원인']
+        display_columns = ["발생일시", "공종(중분류)", "작업프로세스", "인적사고", "사고원인"]
         available_columns = [col for col in display_columns if col in df_result.columns]
-        
-        selected_df = df_result[available_columns].fillna('N/A').copy()
-        
-        # ✅ 번호를 1부터 시작하도록 수정
+
+        selected_df = df_result[available_columns].fillna("N/A").copy()
+
         selected_df.index = range(1, len(selected_df) + 1)
         selected_df.index.name = "번호"
-        
-        actions = []
-        
-        table_content = selected_df.to_markdown(index=True) 
-        
+
+        actions: List[cl.Action] = []
+
+        table_content = selected_df.to_markdown(index=True)
+
         await cl.Message(
             content=f"### 📈 사고 기록 목록 (총 {accident_count}건)\n"
         ).send()
 
-        await cl.Message(
-            content=f"```markdown\n{table_content}\n```"
-        ).send()
+        await cl.Message(content=f"```markdown\n{table_content}\n```").send()
 
         for idx in range(accident_count):
             actions.append(
@@ -597,65 +664,77 @@ async def handle_accident_selection(
                     name=f"show_detail_{idx+1}",
                     value=str(idx),
                     label=f"[{idx+1}] 상세 확인",
-                    payload={"index": idx, "action": "show_detail"}
+                    payload={"index": idx, "action": "show_detail"},
                 )
             )
-        
-        actions.append(cl.Action(name="exit_list", value="exit", label="❌ 목록 취소/종료", payload={"action": "exit"}))
+
+        actions.append(
+            cl.Action(
+                name="exit_list",
+                value="exit",
+                label="❌ 목록 취소/종료",
+                payload={"action": "exit"},
+            )
+        )
 
         await cl.Message(
             content=f"**후속 작업을 위해 목록에서 사고 번호 (1~{accident_count})를 선택하거나 목록을 취소해주세요:**",
-            actions=actions
+            actions=actions,
         ).send()
-        
+
         res = await cl.AskActionMessage(
-            content="", actions=actions, timeout=300 
+            content="", actions=actions, timeout=300
         ).send()
 
         if res:
-            # ✅ 여러 방법으로 action 추출
             action_type = res.get("payload", {}).get("action")
             if not action_type:
                 action_type = res.get("value")
-            
+
             if action_type == "exit":
                 await cl.Message(content="✅ 작업을 종료합니다.").send()
                 return
-                
+
             elif action_type == "show_detail":
-                # ✅ payload의 index를 우선 사용
                 selected_idx = res.get("payload", {}).get("index")
                 if selected_idx is None:
                     selected_idx = int(res.get("value", 0))
                 else:
                     selected_idx = int(selected_idx)
-                
-                # 🔥 FIXED: SQL 결과(df_result)가 아니라
-                # 전체 CSV(df)에서 ID로 다시 조회해서 full row 사용
+
                 df_full = cl.user_session.get("df")
-                if df_full is not None and "ID" in df_full.columns and "ID" in df_result.columns:
+                if (
+                    df_full is not None
+                    and "ID" in df_full.columns
+                    and "ID" in df_result.columns
+                ):
                     selected_row = df_result.iloc[selected_idx]
                     accident_id = selected_row["ID"]
                     mask = df_full["ID"] == accident_id
                     if mask.any():
                         accident_data = df_full[mask].iloc[0]
                     else:
-                        # 혹시 못 찾으면 fallback으로 df_result row 사용
                         accident_data = selected_row
                 else:
-                    # df_full이 없거나 ID 컬럼이 없으면 기존 방식 유지
                     accident_data = df_result.iloc[selected_idx]
 
-                # 세션에 저장
                 cl.user_session.set("selected_accident_data", accident_data)
-                
-                # 상세 정보 확인 단계로 이동 (재귀 호출)
-                await cl.Message(content=f"🔍 **[{selected_idx + 1}]번 사고**의 상세 정보를 확인합니다.").send()
-                await handle_accident_selection(df_result, accident_count, current_intent="show_detail", original_intent=original_intent)
+
+                await cl.Message(
+                    content=f"🔍 **[{selected_idx + 1}]번 사고**의 상세 정보를 확인합니다."
+                ).send()
+                await handle_accident_selection(
+                    df_result,
+                    accident_count,
+                    current_intent="show_detail",
+                    original_intent=original_intent,
+                )
                 return
-                
+
             else:
-                await cl.Message(content="⚠️ 선택 시간이 초과되어 작업을 종료합니다.").send()
+                await cl.Message(
+                    content="⚠️ 선택 시간이 초과되어 작업을 종료합니다."
+                ).send()
                 return
 
 
@@ -678,22 +757,20 @@ async def start():
         sql_agent = CSVSQLAgent(CSV_PATH)
         cl.user_session.set("sql_agent", sql_agent)
     except Exception as e:
-        await cl.Message(
-            content=f"❌ SQL Agent 초기화 실패: {e}"
-        ).send()
+        await cl.Message(content=f"❌ SQL Agent 초기화 실패: {e}").send()
         return
-        
+
     intent_agent = IntentAgent()
     cl.user_session.set("intent_agent", intent_agent)
 
     # RAGAgent 및 HumanFeedbackCollector 초기화
     try:
-        rag_agent = RAGAgent() 
+        rag_agent = RAGAgent()
         feedback_collector = HumanFeedbackCollector()
-        
+
         cl.user_session.set("rag_agent", rag_agent)
         cl.user_session.set("feedback_collector", feedback_collector)
-        
+
     except Exception as e:
         await cl.Message(
             content=f"❌ RAG/Feedback 시스템 초기화 실패: {e}"
@@ -751,49 +828,60 @@ async def main(message: cl.Message):
 
     # 1단계: IntentAgent 처리
     intent_result = None
-    
+
     async with cl.Step(name="🔍 의도 분석", type="tool") as step:
         step.input = user_input
-        
+
         try:
-            intent_result = await cl.make_async(intent_agent.parse_and_decide)(user_input, df)
-            
-            intent = intent_result.get("intent", "query_sql") 
+            intent_result = await cl.make_async(intent_agent.parse_and_decide)(
+                user_input, df
+            )
+
+            intent = intent_result.get("intent", "query_sql")
             date_str = intent_result.get("date")
-            
+
             step.output = f"의도: {intent}, 날짜: {date_str}"
-            
+
         except Exception as e:
             step.output = f"파싱 오류: {e}"
-            await cl.Message(content=f"❌ 의도 분석 중 오류 발생: {e}").send()
+            await cl.Message(
+                content=f"❌ 의도 분석 중 오류 발생: {e}"
+            ).send()
             return
-            
+
         if not intent_result["success"] and intent != "query_sql":
-             await cl.Message(content=f"❌ {intent_result.get('error')}").send()
-             return
+            await cl.Message(content=f"❌ {intent_result.get('error')}").send()
+            return
 
     # 2단계: SQL 쿼리 실행
     await cl.Message(content=f"**🎯 실행 모드**: **SQL 쿼리 조회**").send()
     async with cl.Step(name="📊 SQL 쿼리 실행", type="tool") as step:
         step.input = user_input
-        
+
         sql_result = await cl.make_async(sql_agent.query)(user_input)
-        
+
         if sql_result["success"]:
             df_result = pd.DataFrame(sql_result["rows"])
             accident_count = len(df_result)
-            
+
             step.output = f"SQL 성공. {accident_count}건 검색됨."
 
             await cl.Message(
                 content=f"## ✅ SQL 쿼리 결과\n\n**📝 생성된 SQL:**\n```sql\n{sql_result['generated_sql']}\n```\n\n**📊 검색된 사고 수:** **{accident_count}건**"
             ).send()
-            
+
             if accident_count > 0:
-                await handle_accident_selection(df_result, accident_count, current_intent="list_view", original_intent=intent)
-                return 
+                await handle_accident_selection(
+                    df_result,
+                    accident_count,
+                    current_intent="list_view",
+                    original_intent=intent,
+                )
+                return
             else:
-                await cl.Message(content="✅ 검색 결과가 없습니다. 작업을 종료합니다.").send()
+                await cl.Message(
+                    content="✅ 검색 결과가 없습니다. 작업을 종료합니다."
+                ).send()
                 return
         else:
             step.output = f"SQL 실패: {sql_result['error']}"
