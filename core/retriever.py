@@ -34,7 +34,7 @@ class SingleDBHybridRetriever:
         self,
         db_dir: str,
         top_k: int = 5,
-        alpha: float = 0.5,
+        alpha: float = 0.3,
         reranker_model: str = "BAAI/bge-reranker-v2-m3"
     ):
         self.db_dir = db_dir

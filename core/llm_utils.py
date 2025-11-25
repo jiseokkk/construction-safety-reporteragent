@@ -14,7 +14,7 @@ def call_llm(
     model: str = "gpt-4o",
     temperature: float = 0.7,
     top_p: float = 1.0,
-    max_tokens: int = 4000,
+    max_tokens: int = 16000,
 ) -> str:
     """
     OpenAI LLM 호출 유틸리티 함수

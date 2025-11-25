@@ -43,7 +43,7 @@ def summarize_accident_cause(rag_output: str, user_query: str) -> str:
             [system_message, user_message],
             temperature=0.2,
             top_p=0.9,
-            max_tokens=800,
+            max_tokens=1600,
         )
         if not text or "⚠️" in text:
             print("⚠️ 사고발생 경위 요약 생성 실패:", text)
