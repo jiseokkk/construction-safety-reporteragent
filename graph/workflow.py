@@ -1,13 +1,17 @@
 """
 LangGraph Workflow
 단 하나의 노드(orchestrator_node)만 사용하여 전체 워크플로우 관리
+
+✅ 수정사항: OrchestratorAgent.run()이 async 함수로 변경되었으므로,
+           orchestrator_node를 async로 선언하고 await을 추가합니다.
 """
 from langgraph.graph import StateGraph, END
 from core.agentstate import AgentState
 from agents.orchestrator import orchestrator
 
 
-def orchestrator_node(state: AgentState) -> AgentState:
+# 🌟 orchestrator_node를 async 함수로 선언
+async def orchestrator_node(state: AgentState) -> AgentState: # 🌟 async 추가
     """
     LangGraph의 유일한 노드
     Orchestrator가 내부에서 SubAgent들을 조율
@@ -16,15 +20,15 @@ def orchestrator_node(state: AgentState) -> AgentState:
     print("🎯 [ORCHESTRATOR NODE] 실행")
     print(f"{'#'*80}")
     
-    # Orchestrator 실행
-    updated_state = orchestrator.run(state)
+    # 🌟 Orchestrator 실행 시 await 추가
+    updated_state = await orchestrator.run(state) # 🌟 await 추가
     
     return updated_state
 
 
 def should_continue(state: AgentState) -> str:
     """
-    다음 노드를 결정하는 조건부 엣지
+    다음 노드를 결정하는 조건부 엣지 (로직 유지)
     
     Returns:
         "continue": orchestrator_node를 다시 실행
@@ -48,12 +52,7 @@ def should_continue(state: AgentState) -> str:
 # ========================================
 def create_graph():
     """
-    워크플로우 그래프 생성
-    
-    구조:
-        START → orchestrator_node ⟲ (반복)
-                      ↓
-                     END
+    워크플로우 그래프 생성 (로직 유지)
     """
     workflow = StateGraph(AgentState)
     

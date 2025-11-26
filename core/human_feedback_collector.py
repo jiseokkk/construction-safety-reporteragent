@@ -1,3 +1,5 @@
+# core/human_feedback_collector.py (최종 수정 완료)
+
 from typing import List, Dict, Any, Tuple, Optional
 from langchain_core.documents import Document
 from core.advanced_document_processor import AdvancedDocumentProcessor
@@ -7,15 +9,20 @@ import chainlit as cl
 class HumanFeedbackCollector:
     """RAG 검색 결과에 대한 Human-in-the-Loop 피드백 수집 (Chainlit)"""
 
-    def __init__(self, enable_advanced_processing: bool = True):
+    # 🌟 생성자 수정: available_dbs 인수를 받도록 추가 🌟
+    def __init__(self, available_dbs: Optional[List[str]] = None, enable_advanced_processing: bool = True):
         self.feedback_history = []
         self.enable_advanced_processing = enable_advanced_processing
+        
+        # available_dbs를 인스턴스 변수로 저장
+        self.available_dbs = available_dbs if available_dbs is not None else []
+        
         self.processor = (
             AdvancedDocumentProcessor() if enable_advanced_processing else None
         )
 
     # =====================================================================================
-    # ✅ DOCX용 근거 자료 생성 함수
+    # ✅ DOCX용 근거 자료 생성 함수 (기존 유지)
     # =====================================================================================
     def _build_source_references(
         self,
@@ -47,20 +54,23 @@ class HumanFeedbackCollector:
         return refs
 
     # =====================================================================================
+    # 🌟 process 메서드 (AdvancedDocumentProcessor 호출에 await 추가)
+    # =====================================================================================
     async def process(
-        self, docs: List[Document], query: str, available_dbs: List[str]
+        self, docs: List[Document], query: str
     ) -> Tuple[List[Document], Dict[str, Any]]:
-
+        
         if not docs:
             await cl.Message(content="⚠️ 검색된 문서가 없습니다.").send()
             return docs, {"action": "no_docs"}
 
         # --------------------------------------
-        # Phase 3 고급 처리
+        # Phase 3 고급 처리 (LLM 호출 포함)
         # --------------------------------------
         processed_results = None
         if self.enable_advanced_processing and self.processor:
-            processed_results = self.processor.process_documents(
+            # ❗❗ Loop Blockage 해결: process_documents가 async로 변경되었으므로 await 추가
+            processed_results = await self.processor.process_documents( 
                 docs=docs,
                 user_query=query,
                 remove_duplicates=True,
@@ -69,13 +79,10 @@ class HumanFeedbackCollector:
             docs = [result["doc"] for result in processed_results]
 
         # --------------------------------------
-        # 근거 목록 자동 생성
+        # 근거 목록 자동 생성 및 UI 출력 로직 (유지)
         # --------------------------------------
         source_references = self._build_source_references(docs, processed_results)
 
-        # --------------------------------------
-        # 문서 미리보기 UI
-        # --------------------------------------
         await self._preview_documents_chainlit(docs, processed_results)
 
         # --------------------------------------
@@ -84,7 +91,7 @@ class HumanFeedbackCollector:
         action = await self._get_user_action_chainlit_button()
 
         # =====================================================================================
-        # 선택 분기 — 모든 return 값에 source_references 포함
+        # 선택 분기 (로직 유지)
         # =====================================================================================
 
         # 1) 전체 문서 사용
@@ -145,7 +152,8 @@ class HumanFeedbackCollector:
 
         # 4) 다른 DB에서 재검색
         elif action == "research_db":
-            selected_dbs = await self._select_databases_chainlit(available_dbs)
+            # self.available_dbs 사용
+            selected_dbs = await self._select_databases_chainlit(self.available_dbs)
             return (
                 docs,
                 {
@@ -163,7 +171,7 @@ class HumanFeedbackCollector:
             return (
                 docs,
                 {
-                    "action": "accept_all",
+                    "action": "web_search",
                     "count": len(docs),
                     "web_search_requested": True,
                     "source_references": source_references,
@@ -182,10 +190,10 @@ class HumanFeedbackCollector:
         )
 
     # =====================================================================================
-    # 사용자 행동 선택 UI
+    # 사용자 행동 선택 UI 및 기타 헬퍼 함수 (로직 유지)
     # =====================================================================================
     async def _get_user_action_chainlit_button(self) -> Optional[str]:
-
+        # ... (로직 유지) ...
         actions = [
             cl.Action(
                 name="action_1",
@@ -232,10 +240,6 @@ class HumanFeedbackCollector:
             or res.get("name")
         )
 
-    # =====================================================================================
-    # 문서 선택/미리보기 등 나머지 함수 — 기존 유지
-    # =====================================================================================
-
     async def _preview_documents_chainlit(
         self, docs: List[Document], processed_results: List[Dict] = None
     ):
@@ -246,7 +250,7 @@ class HumanFeedbackCollector:
 총 **{len(docs)}개 문서**를 찾았습니다.
 """
         await cl.Message(content=header).send()
-
+        
         for idx, doc in enumerate(docs, 1):
             metadata = doc.metadata
             content = doc.page_content
@@ -287,7 +291,7 @@ class HumanFeedbackCollector:
                 if r.get("key_sentences"):
                     doc_info += "\n🎯 핵심 문장:\n"
                     for i, s in enumerate(r["key_sentences"], 1):
-                        doc_info += f"   {i}) {s}\n"
+                        doc_info += f"   {i}) {s}\n"
 
             content_preview = (
                 content[:800] + "...\n(800자 표시)"
@@ -311,7 +315,7 @@ class HumanFeedbackCollector:
     async def _select_documents_chainlit(
         self, docs: List[Document]
     ) -> List[Document]:
-
+        # ... (로직 유지) ...
         msg = await cl.AskUserMessage(
             content=f"""
 📌 사용할 문서 번호를 입력하세요.
@@ -337,7 +341,7 @@ class HumanFeedbackCollector:
             return []
 
     def _parse_selection(self, selection: str, max_num: int) -> List[int]:
-
+        # ... (로직 유지) ...
         indices = []
 
         for part in selection.split(","):
@@ -353,6 +357,7 @@ class HumanFeedbackCollector:
         return [i for i in indices if 1 <= i <= max_num]
 
     async def _get_additional_keywords_chainlit(self) -> List[str]:
+        # ... (로직 유지) ...
         msg = await cl.AskUserMessage(
             content="🔍 추가 검색 키워드를 입력하세요 (쉼표로 구분)",
             timeout=180,
@@ -366,7 +371,7 @@ class HumanFeedbackCollector:
     async def _select_databases_chainlit(
         self, available_dbs: List[str]
     ) -> List[str]:
-
+        # 💡 self.available_dbs 사용 (로직 유지)
         db_list = "\n".join(
             [f"[{i}] {db}" for i, db in enumerate(available_dbs, 1)]
         )

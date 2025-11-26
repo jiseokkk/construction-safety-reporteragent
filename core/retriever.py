@@ -33,7 +33,7 @@ class SingleDBHybridRetriever:
     def __init__(
         self,
         db_dir: str,
-        top_k: int = 5,
+        top_k: int = 20,
         alpha: float = 0.3,
         reranker_model: str = "BAAI/bge-reranker-v2-m3"
     ):
@@ -89,7 +89,7 @@ class SingleDBHybridRetriever:
 
         # 4) Rerank
         reranker = HuggingFaceCrossEncoder(model_name=self.reranker_model)
-        compressor = CrossEncoderReranker(model=reranker, top_n=self.top_k * 2)
+        compressor = CrossEncoderReranker(model=reranker, top_n= 5)
         reranked = compressor.compress_documents(hybrid_docs, query)
 
         # 5) Clean & return top_k
