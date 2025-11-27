@@ -304,6 +304,7 @@ async def handle_accident_selection(
                         state["hitl_payload"] = feedback
                         state["retrieved_docs"] = docs # 사용자가 선택한 최종 문서 목록
                         state["wait_for_user"] = False # 플래그 해제 -> LangGraph 재개
+                        state["source_references"] = feedback.get("source_references", [])
                         
                         continue # while 루프 재시작 (LangGraph 재호출)
 

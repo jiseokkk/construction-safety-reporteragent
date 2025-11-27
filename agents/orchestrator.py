@@ -159,6 +159,7 @@ DOCX:
 5. 'search_only' 모드이고 RAG 완료(True) 상태라면, None을 반환하여 멈춰야 합니다.
 
 반드시 tool-calling 형식으로만 응답하세요.
+
 """,
         }
 
@@ -304,8 +305,12 @@ DOCX:
         state["next_agent"] = next_agent
 
         # 🎯🎯🎯 Agent의 run 메서드는 async이므로, 반드시 await 호출 🎯🎯🎯
-        return await agent.run(state)
+        safe_state = state.copy()             # <-- 추가
+        returned_state = await agent.run(safe_state)  
+        state.update(returned_state)          # <-- 추가
+        return state  
 
 
 # 전역 인스턴스
 orchestrator = OrchestratorAgent()
+
