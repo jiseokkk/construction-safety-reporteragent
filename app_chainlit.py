@@ -1,35 +1,40 @@
 """
-Chainlit 기반 건설안전 Multi-Agent 시스템 - HITL 수정 버전
+Chainlit 기반 건설안전 Multi-Agent 시스템 - LangGraph Orchestrator 중심 버전
 
-✅ 핵심 변경사항:
-1. RAGAgent 검색 후 HITL을 app_chainlit.py에서 직접 처리
-2. 비동기 함수 호출 문제 해결
-3. 사용자에게 HITL UI가 제대로 표시됨
+✅ 최종 해결:
+1. RAGAgent 직접 호출 및 HITL 루프 로직을 app_chainlit.py에서 제거.
+2. LangGraph (workflow.py)를 호출하고, 'wait_for_user' 상태를 통해 HITL을 처리하는 루프 구현.
+3. RAGAgent 인스턴스 대신 DB 목록만 저장하여 프론트엔드/백엔드 분리 강화.
+4. [오류 해결] graph_app.invoke 대신 **await graph_app.ainvoke**를 사용하여 비동기 오류를 해결.
 """
 
 import chainlit as cl
-import pandas as pd
+import pandas as pd 
 from typing import Dict, Any, Optional, List
 import os
 from datetime import datetime
 from langchain_core.documents import Document
 
-from core.agentstate import AgentState
-from graph.workflow import graph_app
+# 💡 core/agentstate는 그대로 사용
+from core.agentstate import AgentState 
+# 💡 graph/workflow에서 LangGraph 앱을 가져옴
+from graph.workflow import graph_app 
 from core.llm_utils import call_llm
 from agents.intent_agent import IntentAgent
 from agents.sql_agent import CSVSQLAgent
-from agents.subagents import RAGAgent
+# RAGAgent는 이제 Orchestrator가 호출하지만, DB 목록 정보 추출을 위해 필요
+from agents.subagents import RAGAgent 
 from core.human_feedback_collector import HumanFeedbackCollector
 
 # ========================================
 # 전역 설정
 # ========================================
-CSV_PATH = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/data/test_preprocessing.csv"
+# ⚠️ 주의: CSV_PATH는 시스템 환경에 맞게 수정해주세요
+CSV_PATH = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/data/test_preprocessing.csv" 
 
 
 # ========================================
-# 헬퍼 함수
+# 헬퍼 함수 (변경 없음)
 # ========================================
 def load_csv_data():
     """CSV 데이터 로드"""
@@ -51,7 +56,7 @@ def load_csv_data():
 
 
 def row_to_user_query(row: pd.Series) -> str:
-    """CSV row를 user_query로 변환"""
+    """CSV row를 user_query로 변환 (기존 로직 유지)"""
     query = "[사고 속성]\n"
 
     fields = {
@@ -72,8 +77,8 @@ def row_to_user_query(row: pd.Series) -> str:
 
 
 def format_csv_details(row: pd.Series) -> str:
-    """CSV 상세 정보 포맷 - 최종 수정 버전"""
-
+    """CSV 상세 정보 포맷 (기존 로직 유지)"""
+    
     def safe_get(series, key, default="N/A"):
         try:
             value = series[key]
@@ -124,183 +129,13 @@ def format_csv_details(row: pd.Series) -> str:
 {safe_get(row, '사고원인')}
 """
 
-
 # ========================================
-# 🔑 RAG 검색 + HITL 처리 (최종 수정 버전)
+# ❌ 제거된 함수: perform_rag_search_with_hitl
+# ❌ 제거된 함수: continue_to_report
 # ========================================
-async def perform_rag_search_with_hitl(
-    user_query: str,
-    state: AgentState,
-    rag_agent: RAGAgent,
-    feedback_collector: HumanFeedbackCollector,
-) -> Dict[str, Any]:
-
-    # 1) RAG 검색 (HITL 없이 1차 검색)
-    await cl.Message(content="🔍 **관련 안전 지침 검색 중...**").send()
-
-    try:
-        docs = await cl.make_async(rag_agent.search_only)(user_query, state)
-
-        if not docs:
-            await cl.Message(content="⚠️ 관련 문서를 찾지 못했습니다.").send()
-            return {
-                "success": False,
-                "docs": [],
-                "feedback": {},
-                "web_search_requested": False,
-            }
-
-        await cl.Message(
-            content=f"✅ **{len(docs)}개의 관련 문서를 찾았습니다.**"
-        ).send()
-
-    except Exception as e:
-        await cl.Message(content=f"❌ RAG 검색 오류: {e}").send()
-        return {
-            "success": False,
-            "docs": [],
-            "feedback": {},
-            "web_search_requested": False,
-        }
-
-    # 2) HITL 루프 (최대 3번까지 재검색/수정 허용)
-    max_feedback_loops = 3
-    feedback_loop_count = 0
-    last_feedback: Dict[str, Any] = {}
-
-    while feedback_loop_count < max_feedback_loops:
-        # 🔥 사용자 피드백 수집 (HumanFeedbackCollector)
-        docs, feedback = await feedback_collector.process(
-            docs=docs,
-            query=user_query,
-            available_dbs=rag_agent.available_dbs,
-        )
-        last_feedback = feedback or {}
-        action = last_feedback.get("action")
-
-        # 근거자료 state에 반영
-        src_refs = last_feedback.get("source_references")
-        if src_refs:
-            state["source_references"] = src_refs
-
-        print(f"🔎 [HITL] action = {action}, feedback = {last_feedback}")
-
-        # -------------------------------
-        # 1) 웹 검색 요청 (웹 검색은 Orchestrator에서 WebSearchAgent로 처리)
-        # -------------------------------
-        if last_feedback.get("web_search_requested"):
-            if last_feedback.get("source_references"):
-                state["source_references"] = last_feedback["source_references"]
-            return {
-                "success": True,
-                "docs": docs,
-                "feedback": last_feedback,
-                "web_search_requested": True,
-            }
-
-        # -------------------------------
-        # 2) 키워드 기반 재검색 (research_keyword)
-        # -------------------------------
-        if action == "research_keyword":
-            keywords = last_feedback.get("keywords", [])
-            original_docs = last_feedback.get("original_docs", docs)
-
-            if keywords:
-                enhanced_query = user_query + "\n추가 키워드: " + ", ".join(keywords)
-                await cl.Message(
-                    content=f"🔁 추가 키워드로 재검색합니다: **{', '.join(keywords)}**"
-                ).send()
-
-                try:
-                    new_docs = await cl.make_async(rag_agent.search_only)(
-                        enhanced_query, state
-                    )
-                except Exception as e:
-                    await cl.Message(content=f"❌ 키워드 재검색 오류: {e}").send()
-                    docs = original_docs
-                    break
-
-                docs = (original_docs or []) + (new_docs or [])
-                docs = docs[:15]
-
-                feedback_loop_count += 1
-                continue  # 다시 HITL로 돌아가서 새 문서 목록 보여주기
-
-        # -------------------------------
-        # 3) 다른 DB에서 재검색 (research_db)
-        # -------------------------------
-        if action == "research_db":
-            selected_dbs = last_feedback.get("dbs", [])
-
-            if selected_dbs:
-                await cl.Message(
-                    content=f"🗂️ 선택된 DB에서 재검색합니다: **{', '.join(selected_dbs)}**"
-                ).send()
-
-                try:
-                    structured_query = rag_agent._build_structured_query(state)
-                    new_docs = rag_agent._search_documents(
-                        db_list=selected_dbs,
-                        query=structured_query,
-                        top_k=5,
-                    )
-                    docs = new_docs[:10]
-                except Exception as e:
-                    await cl.Message(content=f"❌ DB 재검색 오류: {e}").send()
-                    pass
-
-            feedback_loop_count += 1
-            continue  # 다시 HITL로 돌아가서 새 문서 목록 보여주기
-
-        # -------------------------------
-        # 4) 문서 확정 (accept_all / select_partial)
-        # -------------------------------
-        if action in ("accept_all", "select_partial"):
-            await cl.Message(
-                content=f"✅ 선택된 문서 {len(docs)}개로 계속 진행합니다."
-            ).send()
-            break
-
-        # -------------------------------
-        # 5) 그 외 (no_docs, 오류 등) → 루프 종료
-        # -------------------------------
-        feedback_loop_count += 1
-        if feedback_loop_count >= max_feedback_loops:
-            await cl.Message(
-                content="⚠️ 최대 HITL 반복 횟수에 도달하여 현재 문서로 진행합니다."
-            ).send()
-            break
-
-    # 마지막 피드백의 근거자료 다시 state에 반영
-    if last_feedback.get("source_references"):
-        state["source_references"] = last_feedback["source_references"]
-
-    # 3) HITL 종료 → 상위 단계에서 후속 메뉴(보고서 생성/웹검색 등)로 이어짐
-    return {
-        "success": True,
-        "docs": docs,
-        "feedback": last_feedback,
-        "web_search_requested": False,
-    }
-
-
-# ========================================
-# Multi-Agent 실행 및 재개 함수
-# ========================================
-async def continue_to_report(state: AgentState) -> Dict[str, Any]:
-    """HITL 완료 후 보고서 생성 계속"""
-
-    state["user_intent"] = "generate_report"
-    state["wait_for_user"] = False
-
-    async with cl.Step(name="📝 보고서 생성 계속", type="run") as step:
-        final_state = await cl.make_async(graph_app.invoke)(state)
-        step.output = "보고서 생성 완료"
-        return final_state
-
 
 async def display_results(final_state: Dict[str, Any], intent: str):
-    """결과 표시"""
+    """결과 표시 (기존 로직 유지)"""
 
     if intent == "search_only":
         docs = final_state.get("retrieved_docs") or []
@@ -343,7 +178,7 @@ async def display_results(final_state: Dict[str, Any], intent: str):
 
 
 # ========================================
-# 사고 선택 및 후속 작업 진행 함수
+# 🔑 사고 선택 및 후속 작업 진행 함수 (핵심 수정)
 # ========================================
 async def handle_accident_selection(
     df_result: pd.DataFrame,
@@ -353,10 +188,9 @@ async def handle_accident_selection(
 ):
     """사고 선택 및 후속 작업 처리"""
 
-    rag_agent: RAGAgent = cl.user_session.get("rag_agent")
-    feedback_collector: HumanFeedbackCollector = cl.user_session.get(
-        "feedback_collector"
-    )
+    feedback_collector: HumanFeedbackCollector = cl.user_session.get("feedback_collector")
+    # available_dbs는 HITL UI 구성에 필요하지만, process 호출 시 인수로 전달하지 않음 (self.available_dbs 사용)
+    available_dbs: List[str] = cl.user_session.get("available_dbs") 
 
     # 3. 상세 정보 확인 후 후속 작업
     if current_intent == "show_detail":
@@ -412,7 +246,7 @@ async def handle_accident_selection(
             elif action_value in ["search_only", "generate_report"]:
                 user_query = row_to_user_query(accident_data)
 
-                # 🔑 State 생성
+                # 🔑 State 생성 및 초기 설정
                 state: AgentState = {
                     "user_query": user_query,
                     "user_intent": action_value,
@@ -423,211 +257,77 @@ async def handle_accident_selection(
                     "accident_overview": str(
                         accident_data.get("사고원인", "N/A")[:200]
                     ),
+                    "wait_for_user": False,
+                    "is_complete": False,
+                    "hitl_action": None, 
+                    "hitl_payload": {},
+                    "retrieved_docs": [],
                 }
 
-                # 🔑 RAG 검색 + HITL (비동기로 직접 처리)
-                rag_result = await perform_rag_search_with_hitl(
-                    user_query=user_query,
-                    state=state,
-                    rag_agent=rag_agent,
-                    feedback_collector=feedback_collector,
-                )
+                # ==========================================================
+                # 🔥 LangGraph Orchestrator 호출 및 HITL 루프 (핵심 로직)
+                # ==========================================================
+                max_loops = 10 
+                loop_count = 0
+                
+                await cl.Message(content="🔄 **Orchestrator 워크플로우를 시작합니다...**").send()
+                
+                while not state.get("is_complete", False) and loop_count < max_loops:
+                    loop_count += 1
+                    
+                    # 1. LangGraph 호출 (LangGraph 내부에서 RAG/WebSearch/Report 실행)
+                    async with cl.Step(name=f"워크플로우 실행 {loop_count}", type="run") as step:
+                        step.input = f"HITL 액션: {state.get('hitl_action') or '초기 실행'}"
+                        
+                        # 💡 오류 해결: graph_app.invoke 대신 graph_app.ainvoke 사용
+                        final_state = await graph_app.ainvoke(state) 
+                        
+                        state = final_state # 상태 업데이트
+                        step.output = f"상태: is_complete={state.get('is_complete')}, wait_for_user={state.get('wait_for_user')}"
+
+                    # 2. ⛔ LangGraph가 HITL을 요청했을 때 (일시 중지)
+                    if state.get("wait_for_user", False):
+                        await cl.Message(content="---").send()
+                        await cl.Message(content="🙋 **사용자 검토(HITL)가 필요합니다.** 관련 문서를 확인하고 피드백을 주세요.").send()
+                        
+                        docs_to_review = state.get("retrieved_docs", [])
+                        
+                        # HumanFeedbackCollector를 사용하여 UI 표시 및 피드백 수집
+                        docs, feedback = await feedback_collector.process(
+                            docs=docs_to_review,
+                            query=state.get("user_query", ""),
+                            # available_dbs=available_dbs, 👈 제거됨
+                        )
+                        
+                        # 3. ➡️ 피드백을 상태에 반영하고 루프 재시작 (LangGraph 재개)
+                        state["hitl_action"] = feedback.get("action", "accept_all")
+                        state["hitl_payload"] = feedback
+                        state["retrieved_docs"] = docs # 사용자가 선택한 최종 문서 목록
+                        state["wait_for_user"] = False # 플래그 해제 -> LangGraph 재개
+                        state["source_references"] = feedback.get("source_references", [])
+                        
+                        continue # while 루프 재시작 (LangGraph 재호출)
+
+                    # 4. ✅ LangGraph가 최종 완료를 알렸을 때
+                    elif state.get("is_complete", False):
+                        break
+                    
+                    # 5. ⚠️ (선택 사항) 예상치 못한 종료 또는 루프 탈출 조건
+                    elif not state.get("next_agent") and not state.get("is_complete") and loop_count > 1:
+                        await cl.Message(content="⚠️ Orchestrator가 다음 단계를 결정하지 못하고 종료됩니다.").send()
+                        state["is_complete"] = True # 강제 종료
+                        break
 
                 # ==========================================================
-                # 🔥 HITL 종료 후: 무조건 후속 메뉴 제공
+                # 🔥 HITL 루프 종료 후: 최종 결과 표시
                 # ==========================================================
-                if rag_result["success"]:
-                    docs = rag_result["docs"]
-                    cl.user_session.set("rag_final_docs", docs)
-
-                    # 근거자료 feedback이 있으면 state에 반영
-                    fb = rag_result.get("feedback") or {}
-                    src_refs = fb.get("source_references") or state.get(
-                        "source_references"
-                    )
-                    if src_refs:
-                        state["source_references"] = src_refs
-
-                    actions = [
-                        cl.Action(
-                            name="full_report",
-                            value="full_report",
-                            label="📝 전체 문서로 보고서 생성",
-                            payload={"action": "full_report"},
-                        ),
-                        cl.Action(
-                            name="partial_report",
-                            value="partial_report",
-                            label="✂️ 일부 문서만 선택하여 보고서 생성",
-                            payload={"action": "partial_report"},
-                        ),
-                        cl.Action(
-                            name="db_research",
-                            value="db_research",
-                            label="🗂️ 다른 DB에서 재검색",
-                            payload={"action": "db_research"},
-                        ),
-                        cl.Action(
-                            name="web_search",
-                            value="web_search",
-                            label="🌐 웹 검색 추가",
-                            payload={"action": "web_search"},
-                        ),
-                        cl.Action(
-                            name="exit",
-                            value="exit",
-                            label="❌ 종료",
-                            payload={"action": "exit"},
-                        ),
-                    ]
-
-                    res = await cl.AskActionMessage(
-                        content="🔍 **HITL 완료! 다음 작업을 선택해주세요.**",
-                        actions=actions,
-                        timeout=180,
-                    ).send()
-
-                    if not res:
-                        await cl.Message(content="⏹ 작업이 종료되었습니다.").send()
-                        return
-
-                    # 1) value 기반
-                    choice = res.get("value")
-
-                    # 2) payload 기반
-                    if not choice:
-                        choice = res.get("payload", {}).get("action")
-
-                    # 3) name 기반
-                    if not choice:
-                        name = res.get("name", "")
-                        action_map = {
-                            "full_report": "full_report",
-                            "partial_report": "partial_report",
-                            "db_research": "db_research",
-                            "web_search": "web_search",
-                            "exit": "exit",
-                        }
-                            #
-                        if name in action_map:
-                            choice = action_map[name]
-
-                    if not choice:
-                        await cl.Message(
-                            content="⏹ 선택이 취소되어 작업을 종료합니다."
-                        ).send()
-                        return
-
-                    # === 선택 분기 ===
-                    if choice == "full_report":
-                        selected_docs = cl.user_session.get(
-                            "rag_final_docs", docs
-                        ) or docs
-                        if not selected_docs:
-                            await cl.Message(
-                                content="⚠ 사용 가능한 문서가 없습니다."
-                            ).send()
-                            return
-
-                        state["retrieved_docs"] = selected_docs
-                        await cl.Message(
-                            content="📝 전체 문서로 보고서를 생성합니다..."
-                        ).send()
-                        final_state = await continue_to_report(state)
-                        await display_results(final_state, "generate_report")
-                        return
-
-                    if choice == "partial_report":
-                        # 현재 설계에서는 HITL에서 이미 일부 문서를 선택했고,
-                        # rag_final_docs가 그 결과이므로 여기서는 그 문서들만 사용.
-                        selected_docs = cl.user_session.get(
-                            "rag_final_docs", docs
-                        ) or docs
-                        if not selected_docs:
-                            await cl.Message(
-                                content="⚠ 선택된 문서가 없습니다."
-                            ).send()
-                            return
-
-                        state["retrieved_docs"] = selected_docs
-                        await cl.Message(
-                            content=f"✂️ 선택된 {len(selected_docs)}개 문서만 사용해 보고서를 생성합니다..."
-                        ).send()
-                        final_state = await continue_to_report(state)
-                        await display_results(final_state, "generate_report")
-                        return
-
-                    if choice == "db_research":
-                        await cl.Message(
-                            content="🗂️ 다른 DB에서 재검색 기능은 추후 확장 예정입니다."
-                        ).send()
-                        return
-
-                    if choice == "web_search":
-                        await cl.Message(content="🌐 웹 검색을 진행합니다...").send()
-                        state["web_search_requested"] = True
-                        final_state = await continue_to_report(state)
-                        await display_results(final_state, "generate_report")
-                        return
-
-                    if choice == "exit":
-                        await cl.Message(content="👋 작업을 종료합니다.").send()
-                        return
-
+                if state.get("is_complete", False):
+                    await display_results(state, state.get("user_intent"))
+                elif loop_count >= max_loops:
+                    await cl.Message(content="⚠️ 최대 워크플로우 실행 횟수에 도달하여 강제 종료됩니다.").send()
+                else:
                     await cl.Message(content="⏹ 작업이 종료되었습니다.").send()
-                    return
-
-                if not rag_result["success"]:
-                    await cl.Message(content="❌ RAG 검색에 실패했습니다.").send()
-                    return
-
-                # 아래 fallback 로직은 이론상 도달하지 않지만, 예비용으로 유지
-                state["retrieved_docs"] = rag_result["docs"]
-
-                if action_value == "search_only":
-                    await cl.Message(content="✅ 검색이 완료되었습니다.").send()
-                    return
-
-                if action_value == "generate_report":
-                    if rag_result.get("web_search_requested"):
-                        state["web_search_requested"] = True
-
-                    confirm_actions = [
-                        cl.Action(
-                            name="confirm_yes",
-                            value="yes",
-                            label="✅ 예, 보고서 생성",
-                            payload={"action": "yes"},
-                        ),
-                        cl.Action(
-                            name="confirm_no",
-                            value="no",
-                            label="❌ 아니오, 취소",
-                            payload={"action": "no"},
-                        ),
-                    ]
-
-                    await cl.Message(
-                        content="**📝 보고서 생성을 진행하시겠습니까?**",
-                        actions=confirm_actions,
-                    ).send()
-
-                    confirm_res = await cl.AskActionMessage(
-                        content="", actions=confirm_actions, timeout=60
-                    ).send()
-
-                    if (
-                        confirm_res
-                        and confirm_res.get("payload", {}).get("action") == "yes"
-                    ):
-                        await cl.Message(
-                            content="📝 **보고서 생성을 시작합니다...**"
-                        ).send()
-                        final_state = await continue_to_report(state)
-                        await display_results(final_state, "generate_report")
-                    else:
-                        await cl.Message(content="✅ 작업을 취소합니다.").send()
-
+                
                 return
 
             else:  # exit
@@ -638,7 +338,7 @@ async def handle_accident_selection(
             await cl.Message(content="✅ 작업을 종료합니다.").send()
             return
 
-    # 1. 목록 제시 및 선택
+    # 1. 목록 제시 및 선택 (기존 로직 유지)
     elif current_intent == "list_view":
         display_columns = ["발생일시", "공종(중분류)", "작업프로세스", "인적사고", "사고원인"]
         available_columns = [col for col in display_columns if col in df_result.columns]
@@ -694,7 +394,7 @@ async def handle_accident_selection(
             if action_type == "exit":
                 await cl.Message(content="✅ 작업을 종료합니다.").send()
                 return
-
+            
             elif action_type == "show_detail":
                 selected_idx = res.get("payload", {}).get("index")
                 if selected_idx is None:
@@ -730,7 +430,7 @@ async def handle_accident_selection(
                     original_intent=original_intent,
                 )
                 return
-
+            
             else:
                 await cl.Message(
                     content="⚠️ 선택 시간이 초과되어 작업을 종료합니다."
@@ -740,7 +440,7 @@ async def handle_accident_selection(
 
 @cl.on_chat_start
 async def start():
-    """채팅 시작 시 초기화"""
+    """채팅 시작 시 초기화 (DB 목록 추출 로직으로 수정)"""
 
     df = load_csv_data()
 
@@ -752,7 +452,7 @@ async def start():
 
     cl.user_session.set("df", df)
 
-    # CSVSQLAgent 및 IntentAgent 초기화
+    # 1. CSVSQLAgent 및 IntentAgent 초기화 (유지)
     try:
         sql_agent = CSVSQLAgent(CSV_PATH)
         cl.user_session.set("sql_agent", sql_agent)
@@ -763,13 +463,17 @@ async def start():
     intent_agent = IntentAgent()
     cl.user_session.set("intent_agent", intent_agent)
 
-    # RAGAgent 및 HumanFeedbackCollector 초기화
+    # 2. 🔑 RAG/Feedback 시스템 초기화 (RAG Agent 인스턴스 제거, DB 목록 추출)
     try:
-        rag_agent = RAGAgent()
-        feedback_collector = HumanFeedbackCollector()
+        # DB 목록 정보 추출을 위한 임시 RAG Agent 인스턴스 생성
+        rag_agent_for_info = RAGAgent()
+        available_dbs = rag_agent_for_info.available_dbs 
 
-        cl.user_session.set("rag_agent", rag_agent)
+        # HumanFeedbackCollector 초기화 시 DB 목록 직접 전달
+        feedback_collector = HumanFeedbackCollector(available_dbs=available_dbs)
+
         cl.user_session.set("feedback_collector", feedback_collector)
+        cl.user_session.set("available_dbs", available_dbs) # DB 목록만 세션에 저장
 
     except Exception as e:
         await cl.Message(
@@ -777,6 +481,7 @@ async def start():
         ).send()
         return
 
+    # ... (기존 환영 메시지 로직 유지) ...
     valid_dates = df["발생일시_parsed"].dropna()
     date_info = ""
     if len(valid_dates) > 0:
@@ -810,7 +515,7 @@ async def start():
 
 @cl.on_message
 async def main(message: cl.Message):
-    """메시지 수신 시 처리"""
+    """메시지 수신 시 처리 (기존 로직 유지)"""
 
     user_input = message.content.strip()
 
@@ -826,9 +531,8 @@ async def main(message: cl.Message):
         await cl.Message(content="❌ 시스템이 초기화되지 않았습니다.").send()
         return
 
-    # 1단계: IntentAgent 처리
+    # 1단계: IntentAgent 처리 (유지)
     intent_result = None
-
     async with cl.Step(name="🔍 의도 분석", type="tool") as step:
         step.input = user_input
 
@@ -853,7 +557,7 @@ async def main(message: cl.Message):
             await cl.Message(content=f"❌ {intent_result.get('error')}").send()
             return
 
-    # 2단계: SQL 쿼리 실행
+    # 2단계: SQL 쿼리 실행 (유지)
     await cl.Message(content=f"**🎯 실행 모드**: **SQL 쿼리 조회**").send()
     async with cl.Step(name="📊 SQL 쿼리 실행", type="tool") as step:
         step.input = user_input
@@ -871,6 +575,7 @@ async def main(message: cl.Message):
             ).send()
 
             if accident_count > 0:
+                # 3단계: 사고 선택 및 LangGraph 호출 루프 진입
                 await handle_accident_selection(
                     df_result,
                     accident_count,
@@ -889,3 +594,4 @@ async def main(message: cl.Message):
                 content=f"❌ SQL 쿼리 실행 실패: {sql_result['error']}\n\n**생성된 SQL:**\n```sql\n{sql_result.get('generated_sql', 'N/A')}\n```"
             ).send()
             return
+        

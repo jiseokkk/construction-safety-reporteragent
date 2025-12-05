@@ -33,13 +33,15 @@ class SingleDBHybridRetriever:
     def __init__(
         self,
         db_dir: str,
-        top_k: int = 5,
-        alpha: float = 0.5,
+        top_k: int = 20,
+        alpha: float = 0.3,
+        rerank_top_n: int = 5,
         reranker_model: str = "BAAI/bge-reranker-v2-m3"
     ):
         self.db_dir = db_dir
         self.top_k = top_k
         self.alpha = alpha
+        self.rerank_top_n = rerank_top_n
         self.reranker_model = reranker_model
 
         print(f"📂 HybridRetriever 초기화: {db_dir}")
@@ -52,6 +54,12 @@ class SingleDBHybridRetriever:
 
         # BM25를 위한 전체 문서 로드
         self.all_docs = list(self.vector_db.docstore._dict.values())
+
+        # 🔥 Reranker를 여기서 한 번만 초기화
+        print(f"🔄 Reranker 모델 로딩: {reranker_model}")
+        self.reranker = HuggingFaceCrossEncoder(model_name=reranker_model)
+        self.compressor = CrossEncoderReranker(model=self.reranker, top_n=rerank_top_n)
+        print(f"✅ Reranker 로딩 완료")
 
     def _hybrid_merge(self, dense_results, sparse_results):
         dense_dict = {hash(doc.page_content): score for doc, score in dense_results}
@@ -77,7 +85,7 @@ class SingleDBHybridRetriever:
         print(f"\n🔍 [HybridRetriever] Query: {query}")
 
         # 1) Dense(AI semantic)
-        dense = self.vector_db.similarity_search_with_score(query, k=self.top_k * 4)
+        dense = self.vector_db.similarity_search_with_score(query, k=self.top_k)
 
         # 2) Sparse(keyword)
         sparse_retriever = BM25Retriever.from_documents(self.all_docs)
@@ -87,10 +95,8 @@ class SingleDBHybridRetriever:
         # 3) Hybrid merge
         hybrid_docs = self._hybrid_merge(dense, sparse)
 
-        # 4) Rerank
-        reranker = HuggingFaceCrossEncoder(model_name=self.reranker_model)
-        compressor = CrossEncoderReranker(model=reranker, top_n=self.top_k * 2)
-        reranked = compressor.compress_documents(hybrid_docs, query)
+        # 4) Rerank - 이미 초기화된 compressor 사용
+        reranked = self.compressor.compress_documents(hybrid_docs, query)
 
         # 5) Clean & return top_k
         final_docs = []

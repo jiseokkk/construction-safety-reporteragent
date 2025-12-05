@@ -180,7 +180,7 @@ def create_description_file(folder_name, output_dir):
 # 5) Main Builder Loop
 # ----------------------------------------------------------
 def build_all():
-    BASE_CHUNK_DIR = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/data/chunks"
+    BASE_CHUNK_DIR = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/data/FinalDB_chunks"
     BASE_DB_DIR = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/DB"
 
     os.makedirs(BASE_DB_DIR, exist_ok=True)

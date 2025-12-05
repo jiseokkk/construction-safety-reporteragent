@@ -1,13 +1,14 @@
 """
 Phase 3: 고급 문서 처리
-- 문서 간 중복 제거 (Semantic Similarity + LLM)
-- 핵심 문장 추출 (사용자 질의 기준)
+
+✅ 수정사항: 모든 LLM 호출을 cl.make_async를 사용하여 비동기로 전환했습니다.
 """
 
 from typing import List, Dict, Any
 from langchain_core.documents import Document
 from core.llm_utils import call_llm
 import json
+import chainlit as cl # cl.make_async 사용을 위해 추가
 
 
 class AdvancedDocumentProcessor:
@@ -16,7 +17,8 @@ class AdvancedDocumentProcessor:
     def __init__(self):
         self.similarity_threshold = 0.85
     
-    def process_documents(
+    # 🌟 메서드 정의: async 추가 및 내부 await 처리
+    async def process_documents( 
         self, 
         docs: List[Document], 
         user_query: str,
@@ -24,15 +26,7 @@ class AdvancedDocumentProcessor:
         extract_key_sentences: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        문서 고급 처리
-        
-        Returns:
-            List[{
-                "doc": Document,
-                "is_duplicate": bool,
-                "key_sentences": List[str],
-                "relevance_summary": str
-            }]
+        문서 고급 처리 (비동기)
         """
         
         if not docs:
@@ -45,15 +39,15 @@ class AdvancedDocumentProcessor:
         # 1단계: 중복 제거
         if remove_duplicates:
             print("\n📊 1단계: 문서 간 중복 제거 중...")
-            unique_docs = self._remove_duplicates_llm(docs)
-            print(f"   ✅ 중복 제거 완료: {len(docs)}개 → {len(unique_docs)}개")
+            unique_docs = await self._remove_duplicates_llm(docs) # 🌟 await 추가
+            print(f"   ✅ 중복 제거 완료: {len(docs)}개 → {len(unique_docs)}개")
         else:
             unique_docs = docs
         
         # 2단계: 각 문서 처리
         print("\n📝 2단계: 핵심 문장 추출 중...")
         for idx, doc in enumerate(unique_docs, 1):
-            print(f"   처리 중... [{idx}/{len(unique_docs)}]", end='\r')
+            print(f"   처리 중... [{idx}/{len(unique_docs)}]", end='\r')
             
             result = {
                 "doc": doc,
@@ -64,18 +58,19 @@ class AdvancedDocumentProcessor:
             
             # 핵심 문장 추출
             if extract_key_sentences:
-                key_info = self._extract_key_info_llm(doc.page_content, user_query)
+                key_info = await self._extract_key_info_llm(doc.page_content, user_query) # 🌟 await 추가
                 result["key_sentences"] = key_info.get("key_sentences", [])
                 result["relevance_summary"] = key_info.get("relevance_summary", "")
             
             processed_docs.append(result)
         
-        print(f"\n   ✅ 핵심 추출 완료: {len(processed_docs)}개 문서")
+        print(f"\n   ✅ 핵심 추출 완료: {len(processed_docs)}개 문서")
         
         return processed_docs
     
-    def _remove_duplicates_llm(self, docs: List[Document]) -> List[Document]:
-        """LLM 기반 중복 문서 제거"""
+    # 🌟 메서드 정의: async 추가 및 내부 await 처리
+    async def _remove_duplicates_llm(self, docs: List[Document]) -> List[Document]:
+        """LLM 기반 중복 문서 제거 (비동기)"""
         
         if len(docs) <= 1:
             return docs
@@ -84,19 +79,20 @@ class AdvancedDocumentProcessor:
         
         for idx, new_doc in enumerate(docs[1:], 2):
             # 기존 문서들과 비교
-            is_duplicate = self._check_duplicate_with_llm(new_doc, unique_docs)
+            is_duplicate = await self._check_duplicate_with_llm(new_doc, unique_docs) # 🌟 await 추가
             
             if not is_duplicate:
                 unique_docs.append(new_doc)
         
         return unique_docs
     
-    def _check_duplicate_with_llm(self, new_doc: Document, existing_docs: List[Document]) -> bool:
-        """새 문서가 기존 문서들과 중복되는지 LLM으로 판단"""
+    # 🌟 메서드 정의: async 추가 및 내부 await 처리
+    async def _check_duplicate_with_llm(self, new_doc: Document, existing_docs: List[Document]) -> bool:
+        """새 문서가 기존 문서들과 중복되는지 LLM으로 판단 (비동기)"""
         
-        # 기존 문서 요약 (메타데이터 중심)
+        # ... (프롬프트 구성 로직 유지) ...
         existing_summaries = []
-        for doc in existing_docs[-3:]:  # 최근 3개만 비교 (효율성)
+        for doc in existing_docs[-3:]:
             metadata = doc.metadata
             summary = f"파일: {metadata.get('file', '?')}, 섹션: {metadata.get('section', '?')}"
             existing_summaries.append(summary)
@@ -123,7 +119,8 @@ JSON 출력만:
 """
         
         try:
-            response = call_llm(
+            # 🌟 LLM 호출을 비동기로 전환 (cl.make_async 사용)
+            response = await cl.make_async(call_llm)(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=100
@@ -137,8 +134,9 @@ JSON 출력만:
             print(f"\n⚠️ 중복 판단 실패: {e} (비중복으로 간주)")
             return False
     
-    def _extract_key_info_llm(self, content: str, user_query: str) -> Dict[str, Any]:
-        """LLM으로 핵심 정보 추출"""
+    # 🌟 메서드 정의: async 추가 및 내부 await 처리
+    async def _extract_key_info_llm(self, content: str, user_query: str) -> Dict[str, Any]:
+        """LLM으로 핵심 정보 추출 (비동기)"""
         
         prompt = f"""
 사용자가 다음 사고를 조사 중입니다:
@@ -169,7 +167,8 @@ JSON 출력:
 """
         
         try:
-            response = call_llm(
+            # 🌟 LLM 호출을 비동기로 전환 (cl.make_async 사용)
+            response = await cl.make_async(call_llm)(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=800
@@ -190,13 +189,10 @@ JSON 출력:
             }
     
     def _parse_json(self, text: str, default: dict) -> dict:
-        """LLM 응답에서 JSON 추출"""
+        """LLM 응답에서 JSON 추출 (로직 유지)"""
         
         if not text:
             return default
-        
-        # <o> 태그 제거
-        text = text.strip()
         
         # 1차: 전체 파싱
         try:

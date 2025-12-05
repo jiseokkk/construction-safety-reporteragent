@@ -43,7 +43,7 @@ def summarize_accident_cause(rag_output: str, user_query: str) -> str:
             [system_message, user_message],
             temperature=0.2,
             top_p=0.9,
-            max_tokens=800,
+            max_tokens=1600,
         )
         if not text or "⚠️" in text:
             print("⚠️ 사고발생 경위 요약 생성 실패:", text)
@@ -177,7 +177,11 @@ def generate_accident_report_node(state: AgentState) -> AgentState:
     summary_cause = summarize_accident_cause(rag_output, user_query)
 
     # ② 조치사항 및 향후조치계획
-    action_plan = generate_action_plan(rag_output, user_query)
+    action_plan = generate_action_plan(
+    rag_output,
+    user_query,
+    state.get("source_references", [])     # ⭐ 근거자료 전달
+)
 
     # ③ 상태 업데이트
     combined = f"【사고발생 경위】\n{summary_cause}\n\n【조치사항 및 향후조치계획】\n{action_plan}"

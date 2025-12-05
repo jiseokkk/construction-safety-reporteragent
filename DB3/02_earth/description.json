@@ -1,0 +1,19 @@
+{
+    "name": "Earthwork & Excavation Safety DB",
+    "domain": "토공사/굴착",
+    "purpose": "굴착·지보공 관련 붕괴 및 매몰 예방 기준 제공.",
+    "covers": [
+        "터파기",
+        "흙막이",
+        "SCW",
+        "CIP"
+    ],
+    "common_accidents": [
+        "붕괴",
+        "매몰"
+    ],
+    "best_for_queries": [
+        "토사 붕괴",
+        "흙막이 변형 사고"
+    ]
+}
