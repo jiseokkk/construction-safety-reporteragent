@@ -1,11 +1,7 @@
 """
 Chainlit 기반 건설안전 Multi-Agent 시스템 - LangGraph Orchestrator 중심 버전
 
-✅ 최종 해결:
-1. RAGAgent 직접 호출 및 HITL 루프 로직을 app_chainlit.py에서 제거.
-2. LangGraph (workflow.py)를 호출하고, 'wait_for_user' 상태를 통해 HITL을 처리하는 루프 구현.
-3. RAGAgent 인스턴스 대신 DB 목록만 저장하여 프론트엔드/백엔드 분리 강화.
-4. [오류 해결] graph_app.invoke 대신 **await graph_app.ainvoke**를 사용하여 비동기 오류를 해결.
+✅ 최종 수정: HITL DB 재검색 시 기존 문서 유지(초기화 방지) 로직 적용
 """
 
 import chainlit as cl
@@ -128,11 +124,6 @@ def format_csv_details(row: pd.Series) -> str:
 ### 📝 사고 원인
 {safe_get(row, '사고원인')}
 """
-
-# ========================================
-# ❌ 제거된 함수: perform_rag_search_with_hitl
-# ❌ 제거된 함수: continue_to_report
-# ========================================
 
 async def display_results(final_state: Dict[str, Any], intent: str):
     """결과 표시 (기존 로직 유지)"""
@@ -257,11 +248,17 @@ async def handle_accident_selection(
                     "accident_overview": str(
                         accident_data.get("사고원인", "N/A")[:200]
                     ),
+                    # RAGAgent에서 활용할 메타 정보 추가
+                    "meta": {
+                        "accident_object": str(accident_data.get("사고객체(중분류)", "N/A")),
+                        "accident_location": str(accident_data.get("장소(중분류)", "N/A")),
+                    },
                     "wait_for_user": False,
                     "is_complete": False,
                     "hitl_action": None, 
                     "hitl_payload": {},
                     "retrieved_docs": [],
+                    "target_dbs": available_dbs,
                 }
 
                 # ==========================================================
@@ -296,15 +293,40 @@ async def handle_accident_selection(
                         docs, feedback = await feedback_collector.process(
                             docs=docs_to_review,
                             query=state.get("user_query", ""),
-                            # available_dbs=available_dbs, 👈 제거됨
                         )
                         
-                        # 3. ➡️ 피드백을 상태에 반영하고 루프 재시작 (LangGraph 재개)
-                        state["hitl_action"] = feedback.get("action", "accept_all")
+                        # 3. ➡️ 피드백 처리 및 State 반영 (수정된 부분)
+                        action = feedback.get("action", "accept_all")
+                        state["hitl_action"] = action
                         state["hitl_payload"] = feedback
-                        state["retrieved_docs"] = docs # 사용자가 선택한 최종 문서 목록
                         state["wait_for_user"] = False # 플래그 해제 -> LangGraph 재개
-                        state["source_references"] = feedback.get("source_references", [])
+
+                        # (A) DB 변경 재검색 (문서 병합을 위해 초기화 안 함!)
+                        if action == "research_db":
+                            selected_dbs = feedback.get("dbs", [])
+                            print(f"🖱️ 사용자 UI 선택: DB 변경(추가 검색) -> {selected_dbs}")
+                            await cl.Message(content=f"🔄 선택한 DB({selected_dbs})에서 문서를 추가로 검색합니다...").send()
+                            # ⚠️ state["retrieved_docs"] 초기화 하지 않음 (RAGAgent에서 병합)
+                            state["retrieved_docs"] = docs # 현재 보이는 문서는 유지
+
+                        # (B) 키워드 추가 재검색
+                        elif action == "research_keyword":
+                            new_keywords = feedback.get("keywords", [])
+                            if new_keywords:
+                                added_query = " " + " ".join(new_keywords)
+                                state["user_query"] = state["user_query"] + added_query
+                                state["retrieved_docs"] = [] # 키워드 변경은 보통 전체 재검색이므로 초기화
+                                await cl.Message(content=f"🔄 키워드 추가됨: '{added_query.strip()}' -> 재검색을 시작합니다.").send()
+
+                        # (C) 웹 검색
+                        elif action == "web_search":
+                             state["web_search_requested"] = True
+                             state["retrieved_docs"] = [] 
+
+                        # (D) 일반적인 경우 (accept_all, select_partial 등)
+                        else:
+                            state["retrieved_docs"] = docs # 사용자가 필터링한 문서 반영
+                            state["source_references"] = feedback.get("source_references", [])
                         
                         continue # while 루프 재시작 (LangGraph 재호출)
 
@@ -501,9 +523,9 @@ async def start():
 ## 💬 사용 방법
 
 ### 🔍 사고 기록 조회
-- **"8월 8일 사고 정보 알려줘"**
+- **"2025년 8월 8일 사고 정보 알려줘"**
 - **"최근 3개월 낙상 사고 찾아줘"**
-- **"2024년 철근콘크리트 사고는 몇 건이야?"**
+- **"2025년 철근콘크리트 사고는 몇 건이야?"**
 
 ### 📝 후속 작업
 - 조회된 사고를 선택하여 관련 지침 검색 또는 보고서 생성을 할 수 있습니다.
@@ -594,4 +616,3 @@ async def main(message: cl.Message):
                 content=f"❌ SQL 쿼리 실행 실패: {sql_result['error']}\n\n**생성된 SQL:**\n```sql\n{sql_result.get('generated_sql', 'N/A')}\n```"
             ).send()
             return
-        

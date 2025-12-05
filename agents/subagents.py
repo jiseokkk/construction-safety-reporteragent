@@ -9,6 +9,8 @@ SubAgents - RAGAgent, WebSearchAgent, ReportWriterAgent 정의 (LangChain LCEL �
 """
 
 from typing import Any, Dict, List, Tuple, Literal, Optional
+import torch
+import gc
 import json
 import os
 import chainlit as cl
@@ -196,16 +198,43 @@ class RAGAgent:
         }
 
     def _search_documents(self, db_list: List[str], query: str, top_k: int = 5) -> List[Document]:
-        """여러 DB에서 문서 검색"""
+        """여러 DB에서 문서 검색 (메모리 최적화 적용)"""
         all_docs = []
+        
+        # 🧹 시작 전 메모리 정리
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         for db_name in db_list:
             db_path = os.path.join(DB_ROOT, db_name)
             if not os.path.exists(os.path.join(db_path, "index.faiss")):
                 continue
+            
             print(f"📂 검색 대상 DB: {db_path}")
-            retriever = SingleDBHybridRetriever(db_dir=db_path, top_k=top_k, alpha=0.5)
-            docs = retriever.retrieve(query) # 동기 호출
-            all_docs.extend(docs)
+            try:
+                # Retriever 생성 및 검색
+                retriever = SingleDBHybridRetriever(db_dir=db_path, top_k=top_k, alpha=0.5)
+                docs = retriever.retrieve(query) 
+                
+                # 메타데이터에 DB 출처 명시
+                for d in docs: d.metadata['db'] = db_name
+                all_docs.extend(docs)
+                
+                # 🧹 사용 완료한 Retriever 객체 삭제 및 메모리 정리 (OOM 방지 핵심)
+                del retriever
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                print(f"⚠️ 검색 중 오류 발생 (DB: {db_name}): {e}")
+                # 오류 발생 시에도 메모리 정리 시도
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+
         return all_docs
 
     async def search_only(self, user_query: str, state: AgentState) -> List[Document]:
@@ -262,9 +291,48 @@ class RAGAgent:
 
         user_query = state.get("user_query", "")
         
-        # search_only 자체가 async이므로 await 직접 호출
-        final_docs = await self.search_only(user_query, state)
+        # 1. 새로운 검색 실행 (새 DB 또는 키워드로 검색된 결과)
+        new_docs = await self.search_only(user_query, state)
         
+        # 2. 기존 문서 및 HITL 액션 확인
+        existing_docs = state.get("retrieved_docs", []) or []
+        hitl_action = state.get("hitl_action")
+        
+        # ---------------------------------------------------------
+        # 🔥 [핵심 수정] 문서 병합 로직 (research_db 일 때만 추가)
+        # ---------------------------------------------------------
+        final_docs = []
+        
+        if hitl_action == "research_db":
+            print(f"➕ [Merge] 기존 {len(existing_docs)}개 + 신규 {len(new_docs)}개 병합 시도")
+            seen_content = set()
+            
+            # (A) 기존 문서 먼저 담기 (보존)
+            for doc in existing_docs:
+                # 중복 체크 키: 파일명 + 내용 앞부분 50자
+                key = (doc.metadata.get("source", ""), doc.page_content[:50])
+                seen_content.add(key)
+                final_docs.append(doc)
+            
+            # (B) 새 문서 뒤에 붙이기 (중복 제외)
+            duplicates = 0
+            for doc in new_docs:
+                key = (doc.metadata.get("source", ""), doc.page_content[:50])
+                if key not in seen_content:
+                    final_docs.append(doc)
+                    seen_content.add(key)
+                else:
+                    duplicates += 1
+            
+            if duplicates > 0:
+                print(f"   (중복된 문서 {duplicates}개는 제외되었습니다.)")
+                
+        else:
+            # 그 외(초기 검색, 키워드 재검색 등)는 결과 교체
+            final_docs = new_docs
+
+        # ---------------------------------------------------------
+
         # HITL 초기화
         state["hitl_action"] = None
         state["hitl_payload"] = {}
@@ -275,14 +343,12 @@ class RAGAgent:
             for i, doc in enumerate(final_docs)
         )
         
-        # 기본 소스 정보 (간단 버전)
         sources = [
             {"idx": i + 1, "filename": doc.metadata.get("file", ""), "section": doc.metadata.get("section", ""), "db": doc.metadata.get("db", "")}
             for i, doc in enumerate(final_docs)
         ]
         
-        # 🌟 [핵심 추가] DocxWriter용 상세 source_references 데이터 생성 🌟
-        # docx_writer.py의 13행(관련 근거자료)을 채우기 위한 필수 데이터 구조입니다.
+        # DocxWriter용 상세 source_references 데이터 생성
         source_references = []
         for i, doc in enumerate(final_docs, 1):
             md = doc.metadata or {}
@@ -290,22 +356,19 @@ class RAGAgent:
             ref_data = {
                 "idx": i,
                 "filename": md.get("file") or md.get("source", "알 수 없는 문서"),
-                "hierarchy": md.get("hierarchy_str", ""), # 문서 계층 정보
-                "section": md.get("section", ""),         # 조항 정보
+                "hierarchy": md.get("hierarchy_str", ""),
+                "section": md.get("section", ""),
                 "db": md.get("db", ""),
-                
-                # 초기 검색 단계이므로 요약/핵심문장은 비어있을 수 있음
-                # (추후 HITL 단계에서 AdvancedDocumentProcessor가 채워줄 수 있음)
                 "relevance_summary": md.get("summary", ""), 
                 "key_sentences": [] 
             }
             source_references.append(ref_data)
 
         # 상태 저장
-        state["retrieved_docs"] = final_docs
+        state["retrieved_docs"] = final_docs # 병합된 리스트 저장
         state["docs_text"] = docs_text
         state["sources"] = sources
-        state["source_references"] = source_references # ✅ 여기가 중요합니다.
+        state["source_references"] = source_references
         state["route"] = "retrieve_complete"
 
         user_intent = state.get("user_intent", "generate_report")
