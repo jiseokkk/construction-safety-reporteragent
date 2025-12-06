@@ -69,9 +69,8 @@ def load_db_descriptions():
     return db_info
 
 
-# ========================================
-# RAGAgent
-# ========================================
+# agents/subagents.py 내 RAGAgent 클래스
+
 class RAGAgent:
     name = "RAGAgent"
 
@@ -248,13 +247,20 @@ class RAGAgent:
         hitl_payload = state.get('hitl_payload', {})
         hitl_action = state.get('hitl_action')
         
-        # 2) DB 선택 계획
+        # [Case A] DB 재검색: 사용자가 선택한 DB를 강제로 사용
         if hitl_action == 'research_db':
-            db_list_override = hitl_payload.get('dbs', [])
-            print(f"🧠 HITL 요청: DB 재검색 → {db_list_override} 사용")
-            plan = self._sanitize_plan({"db_list": db_list_override, "fallback": False})
+            selected_dbs = hitl_payload.get('dbs', [])
+            print(f"🚨 [HITL Override] 사용자 요청으로 DB 강제 변경: {selected_dbs}")
+            plan = {"db_list": selected_dbs, "fallback": False, "fallback_db": ""}
+            
+        # [Case B] 키워드 재검색: 쿼리가 변경되었으므로 LLM이 다시 DB를 계획
+        elif hitl_action == 'research_keyword':
+            print(f"🚨 [HITL Override] 키워드 추가됨 -> DB 재계획 수립")
+            raw_plan = await self._plan_db_selection(structured_query)
+            plan = self._sanitize_plan(raw_plan)
+            
+        # [Case C] 일반 검색 (초기 실행)
         else:
-            # 🔥 LCEL 사용 (Async 호출)
             raw_plan = await self._plan_db_selection(structured_query)
             plan = self._sanitize_plan(raw_plan)
         
@@ -299,11 +305,11 @@ class RAGAgent:
         hitl_action = state.get("hitl_action")
         
         # ---------------------------------------------------------
-        # 🔥 [핵심 수정] 문서 병합 로직 (research_db 일 때만 추가)
+        # 🔥 [핵심] 문서 병합 로직 (DB 변경 OR 키워드 추가 시 병합)
         # ---------------------------------------------------------
         final_docs = []
         
-        if hitl_action == "research_db":
+        if hitl_action in ["research_db", "research_keyword"]:
             print(f"➕ [Merge] 기존 {len(existing_docs)}개 + 신규 {len(new_docs)}개 병합 시도")
             seen_content = set()
             
@@ -328,7 +334,7 @@ class RAGAgent:
                 print(f"   (중복된 문서 {duplicates}개는 제외되었습니다.)")
                 
         else:
-            # 그 외(초기 검색, 키워드 재검색 등)는 결과 교체
+            # 그 외(초기 검색 등)는 결과 교체
             final_docs = new_docs
 
         # ---------------------------------------------------------
@@ -376,7 +382,6 @@ class RAGAgent:
             state["wait_for_user"] = True
         
         return state
-
 
 # ========================================
 # ReportWriterAgent

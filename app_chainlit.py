@@ -1,7 +1,9 @@
 """
 Chainlit 기반 건설안전 Multi-Agent 시스템 - LangGraph Orchestrator 중심 버전
 
-✅ 최종 수정: HITL DB 재검색 시 기존 문서 유지(초기화 방지) 로직 적용
+✅ 최종 수정 완료:
+1. 'research_keyword' (키워드 추가 재검색) 시 기존 문서 목록(retrieved_docs)을 초기화하지 않고 유지하도록 변경.
+2. 이를 통해 RAGAgent에서 기존 문서 + 새 검색 결과를 병합(Merge)할 수 있음.
 """
 
 import chainlit as cl
@@ -169,7 +171,7 @@ async def display_results(final_state: Dict[str, Any], intent: str):
 
 
 # ========================================
-# 🔑 사고 선택 및 후속 작업 진행 함수 (핵심 수정)
+# 🔑 사고 선택 및 후속 작업 진행 함수 (핵심 수정 적용됨)
 # ========================================
 async def handle_accident_selection(
     df_result: pd.DataFrame,
@@ -262,7 +264,7 @@ async def handle_accident_selection(
                 }
 
                 # ==========================================================
-                # 🔥 LangGraph Orchestrator 호출 및 HITL 루프 (핵심 로직)
+                # 🔥 LangGraph Orchestrator 호출 및 HITL 루프
                 # ==========================================================
                 max_loops = 10 
                 loop_count = 0
@@ -295,7 +297,7 @@ async def handle_accident_selection(
                             query=state.get("user_query", ""),
                         )
                         
-                        # 3. ➡️ 피드백 처리 및 State 반영 (수정된 부분)
+                        # 3. ➡️ 피드백 처리 및 State 반영
                         action = feedback.get("action", "accept_all")
                         state["hitl_action"] = action
                         state["hitl_payload"] = feedback
@@ -306,17 +308,23 @@ async def handle_accident_selection(
                             selected_dbs = feedback.get("dbs", [])
                             print(f"🖱️ 사용자 UI 선택: DB 변경(추가 검색) -> {selected_dbs}")
                             await cl.Message(content=f"🔄 선택한 DB({selected_dbs})에서 문서를 추가로 검색합니다...").send()
-                            # ⚠️ state["retrieved_docs"] 초기화 하지 않음 (RAGAgent에서 병합)
                             state["retrieved_docs"] = docs # 현재 보이는 문서는 유지
 
-                        # (B) 키워드 추가 재검색
+                        # (B) 🔥 [수정됨] 키워드 추가 재검색 (기존 문서 유지)
                         elif action == "research_keyword":
                             new_keywords = feedback.get("keywords", [])
                             if new_keywords:
                                 added_query = " " + " ".join(new_keywords)
                                 state["user_query"] = state["user_query"] + added_query
-                                state["retrieved_docs"] = [] # 키워드 변경은 보통 전체 재검색이므로 초기화
+                                
+                                # ❌ 기존 문서 초기화 코드 삭제! (state["retrieved_docs"] = [])
+                                # ✅ 문서를 유지하여 SubAgents에서 병합(Merge)되도록 함
+                                state["retrieved_docs"] = docs 
+                                
                                 await cl.Message(content=f"🔄 키워드 추가됨: '{added_query.strip()}' -> 재검색을 시작합니다.").send()
+                            else:
+                                state["hitl_action"] = None
+                                state["retrieved_docs"] = docs # 취소 시 유지
 
                         # (C) 웹 검색
                         elif action == "web_search":
