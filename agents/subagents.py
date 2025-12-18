@@ -1,11 +1,10 @@
 """
-SubAgents - RAGAgent, WebSearchAgent, ReportWriterAgent 정의 (LangChain LCEL 적용 버전)
+SubAgents - RAGAgent, WebSearchAgent, ReportWriterAgent (Self-Correction with GPT-4o)
 
-✅ 핵심 변경사항:
-1. RAGAgent, ReportWriterAgent의 LLM 호출 및 파싱 로직을 LangChain LCEL + Pydantic으로 전면 교체.
-2. 불안정한 `parse_json_with_recovery` 및 `call_llm` 의존성 제거.
-3. RAGAgent.run()에 `source_references` 생성 로직 추가 (DOCX 13행 생성용).
-4. 기존 로직(HITL 처리, 문서 검색 흐름 등)은 100% 유지.
+✅ 수정 사항:
+1. ReportEvaluation Pydantic 모델 추가 (Self-Correction용)
+2. ReportSelfCorrector 클래스 추가 (GPT-4o 기반 평가/수정)
+3. ReportWriterAgent: 초안 작성 -> 평가 -> 수정 루프 적용
 """
 
 from typing import Any, Dict, List, Tuple, Literal, Optional
@@ -23,6 +22,7 @@ from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 # 기존 모듈 임포트
+from core.llm_factory import get_llm
 from core.agentstate import AgentState
 from core.docx_writer import create_accident_report_docx
 from core.final_report import summarize_accident_cause, generate_action_plan
@@ -33,34 +33,36 @@ from core.chunk_formatter import ChunkFormatter
 DB_ROOT = "/home/user/Desktop/jiseok/capstone/RAG/construction-safety-agent/DB"
 
 # ======================================================================
-# 1. Pydantic 모델 정의 (LLM 출력 스키마 강제)
+# 1. Pydantic 모델 정의
 # ======================================================================
 
 class DBRoutingPlan(BaseModel):
     """RAGAgent의 DB 선택 계획"""
-    db_list: List[str] = Field(description="검색할 데이터베이스 폴더 이름 목록 (예: ['01_bridge', '03_tunnel'])")
+    db_list: List[str] = Field(description="검색할 데이터베이스 폴더 이름 목록")
     fallback: bool = Field(description="검색 결과가 부족할 경우 Fallback DB를 사용할지 여부")
-    fallback_db: str = Field(description="Fallback으로 사용할 DB 이름 (보통 '08_general')")
-    reasoning: str = Field(description="이 DB들을 선택한 논리적 근거 (CoT)") 
+    fallback_db: str = Field(description="Fallback으로 사용할 DB 이름")
+    reasoning: str = Field(description="이 DB들을 선택한 논리적 근거") 
 
 class ReportAction(BaseModel):
     """ReportWriterAgent의 다음 행동 결정"""
-    action: Literal["web_search", "final_report", "create_docx", "noop"] = Field(
-        description="수행할 작업의 이름"
-    )
-    reason: str = Field(description="해당 작업을 선택한 이유")
+    action: Literal["web_search", "final_report", "create_docx", "noop"] = Field(...)
+    reason: str = Field(...)
+
+# 🔥 [NEW] 보고서 평가 모델 (먼저 정의되어야 함)
+class ReportEvaluation(BaseModel):
+    """보고서 품질 평가 결과"""
+    faithfulness_score: int = Field(description="1~5점. 원문(Context)에 없는 내용을 지어내지 않았는지 평가.")
+    clarity_score: int = Field(description="1~5점. 논리적 흐름과 문장이 명확한지 평가.")
+    feedback: str = Field(description="점수가 낮다면 구체적으로 어떤 부분을 고쳐야 하는지 지적 (한글).")
+    passed: bool = Field(description="두 점수 모두 4점 이상이면 True, 아니면 False")
 
 
 # ========================================
 # 헬퍼 함수
 # ========================================
 def load_db_descriptions():
-    """DB 폴더의 description.json 로드"""
     db_info = {}
-    if not os.path.exists(DB_ROOT):
-        print(f"⚠️ 경고: DB 루트 경로를 찾을 수 없습니다: {DB_ROOT}")
-        return {}
-        
+    if not os.path.exists(DB_ROOT): return {}
     for folder in os.listdir(DB_ROOT):
         desc_path = os.path.join(DB_ROOT, folder, "description.json")
         if os.path.exists(desc_path):
@@ -69,8 +71,9 @@ def load_db_descriptions():
     return db_info
 
 
-# agents/subagents.py 내 RAGAgent 클래스
-
+# ========================================
+# RAGAgent (기존 유지)
+# ========================================
 class RAGAgent:
     name = "RAGAgent"
 
@@ -78,329 +81,252 @@ class RAGAgent:
         self.db_info: Dict[str, Any] = load_db_descriptions() 
         self.available_dbs: List[str] = sorted(self.db_info.keys())
         self.formatter = ChunkFormatter()
-        print(f"📚 사용 가능한 DB 목록: {self.available_dbs}")
-
-        # ✅ LangChain 설정
-        self.llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
+        # GPT-4o 사용
+        self.llm = get_llm(mode="smart")
+        
         self.parser = PydanticOutputParser(pydantic_object=DBRoutingPlan)
-
+  
     def _build_structured_query(self, state: AgentState) -> str:
-        """사용자 쿼리 + 구조화 정보 + HITL 키워드를 합친 텍스트"""
         user_query = state.get("user_query", "")
-        
-        gongsung = state.get("공종") or state.get("gongsung")
-        process = state.get("작업프로세스") or state.get("process")
-        acc_type = state.get("사고 유형") or state.get("accident_type")
-        obj = state.get("사고객체(중분류)") or state.get("object")
-        location = state.get("장소(중분류)") or state.get("location")
-
         extra_lines = []
-        if gongsung: extra_lines.append(f"공종: {gongsung}")
-        if process: extra_lines.append(f"작업프로세스: {process}")
-        if acc_type: extra_lines.append(f"사고유형: {acc_type}")
-        if obj: extra_lines.append(f"사고객체: {obj}")
-        if location: extra_lines.append(f"장소: {location}")
-
-        extra_block = "\n".join(extra_lines)
+        for k in ["공종", "작업프로세스", "사고 유형", "사고객체(중분류)", "장소(중분류)"]:
+            val = state.get(k)
+            if val: extra_lines.append(f"{k}: {val}")
         
-        # HITL 재검색 키워드 추가
         hitl_payload = state.get('hitl_payload', {})
         if hitl_payload.get('keywords'):
-            extra_block += "\n[HITL 추가 키워드]\n" + ", ".join(hitl_payload['keywords'])
+            extra_lines.append("\n[HITL 추가 키워드]\n" + ", ".join(hitl_payload['keywords']))
         
-        structured_query = f"[User Query]\n{user_query}\n"
-        if extra_block:
-            structured_query += "\n[추가 구조화 정보]\n" + extra_block
-
-        return structured_query
+        return f"[User Query]\n{user_query}\n\n[구조화 정보]\n" + "\n".join(extra_lines)
 
     async def _plan_db_selection(self, structured_query: str) -> Dict[str, Any]: 
-        """LLM에게 DB 선택 계획 요청 (LangChain LCEL 적용)"""
-        
         system_template = """
-당신은 건설안전 RAG 시스템의 DB 라우팅을 담당하는 Agent입니다.
+당신은 건설안전 RAG 시스템의 DB 라우팅 Agent입니다.
+사고 속성을 분석하여 가장 적합한 DB를 1~3개 선택하세요.
 
-################################################################################
-# 🔥임무: 사고 속성 기반으로 가장 적합한 DB를 1~3개 선택하고 Fallback 필요 여부 판단
-################################################################################
-
-사고 속성(객체, 공종, 프로세스 등)을 분석하여 아래 DB 목록 중 가장 적합한 것을 선택하세요.
-
-[사용 가능한 DB 목록 및 설명]
+[DB 목록]
 {db_info}
 
-반드시 아래 형식을 준수하여 JSON으로 응답해야 합니다:
+형식:
 {format_instructions}
-
-판단 기준:
-1. 사고객체/공종/작업프로세스와 DB 설명의 일치도
-2. 관련성 높은 DB 1~3개 선택
-3. 결과가 부족할 것 같으면 fallback=True, fallback_db="08_general" 설정
 """
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_template),
-            ("user", "[사용자 사고 정보]\n{structured_query}")
+            ("user", "{structured_query}")
         ])
-
-        # 🔥 LCEL Chain: Prompt -> LLM -> Parser
         chain = prompt | self.llm | self.parser
 
         try:
-            # Pydantic 객체 반환
-            plan: DBRoutingPlan = await chain.ainvoke({
+            plan = await chain.ainvoke({
                 "db_info": json.dumps(self.db_info, ensure_ascii=False, indent=2),
                 "structured_query": structured_query,
                 "format_instructions": self.parser.get_format_instructions()
             })
-            
-            # Pydantic 객체를 dict로 변환
             return plan.dict()
+        except:
+            return {"db_list": ["08_general"], "fallback": True, "fallback_db": "08_general"}
 
-        except Exception as e:
-            print(f"⚠️ DB 선택 계획 수립 실패 (LCEL 오류): {e}")
-            # Fallback Plan
-            return {
-                "db_list": ["08_general"] if "08_general" in self.available_dbs else (self.available_dbs[:1] or []),
-                "fallback": False,
-                "fallback_db": "08_general" if "08_general" in self.available_dbs else ""
-            }
-
-    def _sanitize_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """실제 존재하는 DB만 남기고 검증"""
-        db_list = plan.get("db_list", []) or []
-        fallback_flag = bool(plan.get("fallback", False))
-        fallback_db_name = plan.get("fallback_db", "08_general")
-
-        valid_db_list = [db for db in db_list if db in self.available_dbs]
-
-        if not valid_db_list:
-            if "08_general" in self.available_dbs:
-                valid_db_list = ["08_general"]
-            elif self.available_dbs:
-                valid_db_list = [self.available_dbs[0]]
-            else:
-                valid_db_list = []
-
-        if fallback_flag and fallback_db_name not in self.available_dbs:
-            if "08_general" in self.available_dbs:
-                fallback_db_name = "08_general"
-            elif self.available_dbs:
-                fallback_db_name = self.available_dbs[0]
-            else:
-                fallback_flag = False
-                fallback_db_name = ""
-
-        return {
-            "db_list": valid_db_list,
-            "fallback": fallback_flag,
-            "fallback_db": fallback_db_name,
-        }
+    def _sanitize_plan(self, plan: Dict) -> Dict:
+        valid_list = [db for db in plan.get("db_list", []) if db in self.available_dbs]
+        if not valid_list: valid_list = ["08_general"] if "08_general" in self.available_dbs else []
+        return {"db_list": valid_list, "fallback": plan.get("fallback", False), "fallback_db": plan.get("fallback_db", "08_general")}
 
     def _search_documents(self, db_list: List[str], query: str, top_k: int = 5) -> List[Document]:
-        """여러 DB에서 문서 검색 (메모리 최적화 적용)"""
         all_docs = []
-        
-        # 🧹 시작 전 메모리 정리
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
         for db_name in db_list:
             db_path = os.path.join(DB_ROOT, db_name)
-            if not os.path.exists(os.path.join(db_path, "index.faiss")):
-                continue
-            
-            print(f"📂 검색 대상 DB: {db_path}")
+            if not os.path.exists(os.path.join(db_path, "index.faiss")): continue
             try:
-                # Retriever 생성 및 검색
                 retriever = SingleDBHybridRetriever(db_dir=db_path, top_k=top_k, alpha=0.5)
                 docs = retriever.retrieve(query) 
-                
-                # 메타데이터에 DB 출처 명시
                 for d in docs: d.metadata['db'] = db_name
                 all_docs.extend(docs)
-                
-                # 🧹 사용 완료한 Retriever 객체 삭제 및 메모리 정리 (OOM 방지 핵심)
                 del retriever
                 gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-            except Exception as e:
-                print(f"⚠️ 검색 중 오류 발생 (DB: {db_name}): {e}")
-                # 오류 발생 시에도 메모리 정리 시도
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                continue
-
+            except: continue
         return all_docs
 
     async def search_only(self, user_query: str, state: AgentState) -> List[Document]:
-        """HITL 없이 RAG 검색만 수행 (run()에서 호출됨)"""
-        print("\n" + "="*80)
-        print("📚 [RAGAgent] search_only - 검색 실행")
-        print("="*80)
-
         structured_query = self._build_structured_query(state)
-
-        hitl_payload = state.get('hitl_payload', {})
         hitl_action = state.get('hitl_action')
         
-        # [Case A] DB 재검색: 사용자가 선택한 DB를 강제로 사용
         if hitl_action == 'research_db':
-            selected_dbs = hitl_payload.get('dbs', [])
-            print(f"🚨 [HITL Override] 사용자 요청으로 DB 강제 변경: {selected_dbs}")
-            plan = {"db_list": selected_dbs, "fallback": False, "fallback_db": ""}
-            
-        # [Case B] 키워드 재검색: 쿼리가 변경되었으므로 LLM이 다시 DB를 계획
-        elif hitl_action == 'research_keyword':
-            print(f"🚨 [HITL Override] 키워드 추가됨 -> DB 재계획 수립")
-            raw_plan = await self._plan_db_selection(structured_query)
-            plan = self._sanitize_plan(raw_plan)
-            
-        # [Case C] 일반 검색 (초기 실행)
+            plan = {"db_list": state.get('hitl_payload', {}).get('dbs', []), "fallback": False}
         else:
             raw_plan = await self._plan_db_selection(structured_query)
             plan = self._sanitize_plan(raw_plan)
         
-        print(f"🧠 최종 사용 계획: {plan}")
-
-        db_list = plan.get("db_list", []) or []
-        fallback_flag = plan.get("fallback", False)
-        fallback_db_name = plan.get("fallback_db", "08_general")
-
-        # 3) 검색 (동기 함수를 cl.make_async로 감싸서 실행 권장)
-        all_docs = await cl.make_async(self._search_documents)(db_list, structured_query, top_k=5)
-
-        # 4) Fallback 검색
-        if fallback_flag and len(all_docs) < 3 and fallback_db_name:
-            fb_path = os.path.join(DB_ROOT, fallback_db_name)
-            print(f"⚠️ Fallback DB 검색 실행 → {fb_path}")
+        all_docs = await cl.make_async(self._search_documents)(plan['db_list'], structured_query)
+        
+        if plan.get('fallback') and len(all_docs) < 3:
+            fb_path = os.path.join(DB_ROOT, plan['fallback_db'])
             if os.path.exists(os.path.join(fb_path, "index.faiss")):
-                # Fallback 검색도 비동기 처리
-                fb_retriever = SingleDBHybridRetriever(db_dir=fb_path, top_k=5, alpha=0.5)
-                fallback_docs = await cl.make_async(fb_retriever.retrieve)(structured_query)
-                all_docs.extend(fallback_docs)
+                fb_retriever = SingleDBHybridRetriever(db_dir=fb_path, top_k=5)
+                fb_docs = await cl.make_async(fb_retriever.retrieve)(structured_query)
+                all_docs.extend(fb_docs)
 
-        final_docs = all_docs[:10]
-        print(f"\n✅ RAG 검색 완료! (총 {len(final_docs)}개 문서)")
-        return final_docs
+        return all_docs[:10]
 
-    # ========================================
-    # 🌟 run() 메서드 (Async)
-    # ========================================
     async def run(self, state: AgentState) -> AgentState: 
-        print("\n" + "="*80)
-        print("📚 [RAGAgent] run - LangGraph 워크플로우 실행")
-        print("="*80)
-
-        user_query = state.get("user_query", "")
-        
-        # 1. 새로운 검색 실행 (새 DB 또는 키워드로 검색된 결과)
-        new_docs = await self.search_only(user_query, state)
-        
-        # 2. 기존 문서 및 HITL 액션 확인
+        print(f"\n📚 [RAGAgent] 실행")
+        new_docs = await self.search_only(state.get("user_query", ""), state)
         existing_docs = state.get("retrieved_docs", []) or []
         hitl_action = state.get("hitl_action")
         
-        # ---------------------------------------------------------
-        # 🔥 [핵심] 문서 병합 로직 (DB 변경 OR 키워드 추가 시 병합)
-        # ---------------------------------------------------------
         final_docs = []
-        
         if hitl_action in ["research_db", "research_keyword"]:
-            print(f"➕ [Merge] 기존 {len(existing_docs)}개 + 신규 {len(new_docs)}개 병합 시도")
-            seen_content = set()
-            
-            # (A) 기존 문서 먼저 담기 (보존)
+            seen = set()
             for doc in existing_docs:
-                # 중복 체크 키: 파일명 + 내용 앞부분 50자
                 key = (doc.metadata.get("source", ""), doc.page_content[:50])
-                seen_content.add(key)
+                seen.add(key)
                 final_docs.append(doc)
-            
-            # (B) 새 문서 뒤에 붙이기 (중복 제외)
-            duplicates = 0
             for doc in new_docs:
                 key = (doc.metadata.get("source", ""), doc.page_content[:50])
-                if key not in seen_content:
+                if key not in seen:
                     final_docs.append(doc)
-                    seen_content.add(key)
-                else:
-                    duplicates += 1
-            
-            if duplicates > 0:
-                print(f"   (중복된 문서 {duplicates}개는 제외되었습니다.)")
-                
+                    seen.add(key)
         else:
-            # 그 외(초기 검색 등)는 결과 교체
             final_docs = new_docs
 
-        # ---------------------------------------------------------
-
-        # HITL 초기화
         state["hitl_action"] = None
         state["hitl_payload"] = {}
         
-        # State 업데이트 (docs_text, sources)
-        docs_text = "\n\n".join(
-            f"[문서 {i+1}] ({doc.metadata.get('file', '?')}, {doc.metadata.get('section', '')})\n{doc.page_content}"
-            for i, doc in enumerate(final_docs)
-        )
+        docs_text = "\n\n".join([f"[{i+1}] {d.page_content}" for i, d in enumerate(final_docs)])
         
-        sources = [
-            {"idx": i + 1, "filename": doc.metadata.get("file", ""), "section": doc.metadata.get("section", ""), "db": doc.metadata.get("db", "")}
-            for i, doc in enumerate(final_docs)
-        ]
-        
-        # DocxWriter용 상세 source_references 데이터 생성
         source_references = []
         for i, doc in enumerate(final_docs, 1):
-            md = doc.metadata or {}
-            
-            ref_data = {
+            md = doc.metadata
+            source_references.append({
                 "idx": i,
-                "filename": md.get("file") or md.get("source", "알 수 없는 문서"),
+                "filename": md.get("file") or md.get("source", "Unknown"),
                 "hierarchy": md.get("hierarchy_str", ""),
                 "section": md.get("section", ""),
                 "db": md.get("db", ""),
-                "relevance_summary": md.get("summary", ""), 
-                "key_sentences": [] 
-            }
-            source_references.append(ref_data)
+                "relevance_summary": md.get("summary", ""),
+                "key_sentences": []
+            })
 
-        # 상태 저장
-        state["retrieved_docs"] = final_docs # 병합된 리스트 저장
+        state["retrieved_docs"] = final_docs
         state["docs_text"] = docs_text
-        state["sources"] = sources
         state["source_references"] = source_references
-        state["route"] = "retrieve_complete"
-
-        user_intent = state.get("user_intent", "generate_report")
-        if user_intent == "search_only":
+        
+        if state.get("user_intent") == "search_only":
             state["wait_for_user"] = True
         
         return state
 
+
 # ========================================
-# ReportWriterAgent
+# 🔥 [NEW] ReportSelfCorrector (GPT-4o 전용)
+# ========================================
+class ReportSelfCorrector:
+    """보고서를 평가하고, 피드백을 반영해 수정하는 Helper Class"""
+    
+    def __init__(self):
+        # ⚠️ GPT-4o 사용
+        self.llm = get_llm(mode="smart")
+        
+        self.eval_parser = PydanticOutputParser(pydantic_object=ReportEvaluation)
+
+    async def evaluate(self, report_text: str, context_text: str, user_query: str) -> ReportEvaluation:
+        """보고서 평가 (Self-Correction)"""
+        
+        system_template = """
+당신은 건설안전 보고서의 엄격한 편집장(Editor)입니다.
+작성된 보고서가 제공된 "참고 문서(Context)"에 기반하여 사실에 입각해 작성되었는지 평가하세요.
+
+[평가 기준]
+1. Faithfulness (충실성): 보고서의 내용이 참고 문서에 근거하는가? (없는 말을 지어내면 감점)
+2. Clarity (명확성): 문장이 명확하고 사고 원인과 대책이 논리적인가?
+
+반드시 아래 JSON 형식으로 응답하세요:
+{format_instructions}
+"""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_template),
+            ("user", "사용자 질문: {user_query}\n\n[참고 문서]\n{context}\n\n[작성된 보고서]\n{report}")
+        ])
+        
+        chain = prompt | self.llm | self.eval_parser
+        
+        try:
+            print("\n🧐 [Self-Correction] 보고서 품질 평가 중...")
+            result = await chain.ainvoke({
+                "user_query": user_query,
+                "context": context_text[:15000], # 토큰 제한 고려
+                "report": report_text,
+                "format_instructions": self.eval_parser.get_format_instructions()
+            })
+            print(f"   📊 평가 점수: 충실성 {result.faithfulness_score}/5, 명확성 {result.clarity_score}/5")
+            return result
+        except Exception as e:
+            print(f"❌ 평가 중 오류 발생 (통과 처리): {e}")
+            return ReportEvaluation(faithfulness_score=5, clarity_score=5, feedback="", passed=True)
+
+    async def refine(self, report_text: str, feedback: str, context_text: str) -> str:
+        """피드백을 반영하여 보고서 수정 (Refinement)"""
+        
+        system_template = """
+당신은 건설안전 보고서 수정 전문가입니다.
+편집장의 피드백을 반영하여 보고서를 다시 작성하세요.
+
+[지침]
+1. **피드백 내용을 철저히 반영**하여 내용을 수정/보완할 것.
+2. 참고 문서에 없는 내용(Hallucination)이 지적되었다면 반드시 삭제할 것.
+3. 기존 보고서의 구조(사고발생 경위, 조치사항 등)는 유지할 것.
+"""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_template),
+            ("user", """
+[참고 문서]
+{context}
+
+[기존 보고서]
+{report}
+
+[편집장 피드백]
+{feedback}
+
+위 피드백을 반영하여 개선된 보고서를 작성해줘.
+""")
+        ])
+        
+        chain = prompt | self.llm
+        
+        print(f"🔧 [Self-Correction] 피드백 반영하여 보고서 수정 중...")
+        response = await chain.ainvoke({
+            "context": context_text[:15000],
+            "report": report_text,
+            "feedback": feedback
+        })
+        
+        return response.content
+
+
+# ========================================
+# ReportWriterAgent (Self-Correction 루프 적용 - GPT-4o 전용)
 # ========================================
 class ReportWriterAgent:
     name = "ReportWriterAgent"
 
     def __init__(self):
         self.action_handlers = {
-            "final_report": self._generate_final_report,
+            "final_report": self._generate_final_report_with_correction, # ✅ 핸들러 이름 변경
             "web_search": self._run_web_search,
             "create_docx": self._create_docx_file,
         }
-        # ✅ LangChain 설정
-        self.llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
+        # ✅ 실험용으로 GPT-4o 고정
+        self.llm = get_llm(mode="smart")
+        
         self.parser = PydanticOutputParser(pydantic_object=ReportAction)
+        
+        # ✅ Self-Correction 모듈 추가
+        self.corrector = ReportSelfCorrector()
 
     def _summarize_state(self, state: AgentState) -> str:
-        """State 요약"""
         doc_cnt = len(state.get("retrieved_docs") or [])
         docs_text_length = len(state.get("docs_text") or "")
         web_done = state.get("web_search_completed", False)
@@ -418,15 +344,12 @@ class ReportWriterAgent:
 """
 
     def _fallback_action(self, state: AgentState) -> Tuple[str, str]:
-        """LLM 실패 시 Rule-based fallback"""
         print("\n⚠️ FALLBACK 모드 활성화 (ReportWriter)")
         if not state.get("report_text"): return "final_report", "[Fallback] 보고서 생성"
         if not state.get("docx_path"): return "create_docx", "[Fallback] DOCX 생성"
         return "noop", "[Fallback] 작업 완료"
 
     async def _decide_action(self, state: AgentState) -> Tuple[str, str]: 
-        """LLM을 사용하여 다음 작업 결정 (LangChain LCEL 적용)"""
-        
         system_template = """
 당신은 ReportWriterAgent로서, 현재 상태를 분석하고 다음 작업을 결정합니다.
 
@@ -452,26 +375,20 @@ class ReportWriterAgent:
             ("user", "{state_summary}")
         ])
 
-        # 🔥 LCEL Chain
         chain = prompt | self.llm | self.parser
-        
         summary = self._summarize_state(state)
 
         try:
-            # Pydantic 객체 반환
             decision: ReportAction = await chain.ainvoke({
                 "state_summary": summary,
                 "format_instructions": self.parser.get_format_instructions()
             })
-            
             return decision.action, decision.reason
-            
         except Exception as exc:
             print(f"⚠️ ReportWriter 의사결정 실패 (LCEL 오류): {exc}")
             return self._fallback_action(state)
 
     def _build_docs_text(self, docs: List[Any]) -> Tuple[str, List[Dict[str, Any]]]:
-        """(로직 유지)"""
         if not docs: return "", []
         chunks = []
         sources = []
@@ -482,63 +399,83 @@ class ReportWriterAgent:
         return "\n\n".join(chunks), sources
 
     def _ensure_docs_text(self, state: AgentState) -> str:
-        """(로직 유지)"""
         if state.get("docs_text"): return state.get("docs_text")
         docs_text, sources = self._build_docs_text(state.get("retrieved_docs") or [])
         state["docs_text"] = docs_text
         if sources: state["sources"] = sources
         return docs_text
 
-    def _generate_final_report(self, state: AgentState) -> AgentState:
-        """(로직 유지)"""
-        rag_output = self._ensure_docs_text(state)
+    # 🔥 [핵심 수정] 초안 생성 -> 평가 -> 수정 루프 구현
+    async def _generate_final_report_with_correction(self, state: AgentState) -> AgentState:
+        print("\n📝 [ReportWriter] 보고서 생성 프로세스 시작 (Self-Correction Enabled)")
+        
+        # 문서 텍스트 확보
+        docs_text = self._ensure_docs_text(state)
         user_query = state.get("user_query", "")
-        # state에서 source_references를 가져옴 (RAGAgent가 생성한 것)
         source_references = state.get("source_references", [])
 
-        if not rag_output:
-            msg = "문서가 없어 보고서를 생성할 수 없습니다."
-            state["summary_cause"] = msg; state["summary_action_plan"] = msg; state["report_text"] = msg
+        if not docs_text:
+            state["report_text"] = "문서가 없어 보고서를 생성할 수 없습니다."
             return state
 
+        # 1. 초안 생성 (Drafting)
         try:
-            # summarize_accident_cause, generate_action_plan은 내부적으로 ChatOpenAI를 쓰므로 동기 함수
-            summary_cause = summarize_accident_cause(rag_output, user_query)
-            action_plan = generate_action_plan(rag_output, user_query, source_references)
-            combined = f"【사고발생 경위】\n{summary_cause}\n\n【조치사항 및 향후조치계획】\n{action_plan}"
+            # summarize_accident_cause 등은 GPT-4o를 사용하는 외부 함수 (동기)
+            summary_cause = summarize_accident_cause(docs_text, user_query)
+            action_plan = generate_action_plan(docs_text, user_query, source_references)
+            current_report = f"【사고발생 경위】\n{summary_cause}\n\n【조치사항 및 향후조치계획】\n{action_plan}"
+        except Exception as e:
+            print(f"❌ 초안 생성 실패: {e}")
+            return state
 
-            state["summary_cause"] = summary_cause
-            state["summary_action_plan"] = action_plan
-            state["report_text"] = combined
-            state["report_summary"] = (combined[:200] + "...") if len(combined) > 200 else combined
-            state["route"] = "report_complete"
-        except Exception as exc:
-            state["report_text"] = f"보고서 생성 실패: {exc}"
+        # 2. Self-Correction Loop (최대 2회 수정)
+        MAX_RETRIES = 2
+        
+        for attempt in range(MAX_RETRIES):
+            # (A) 평가 (Evaluate)
+            evaluation = await self.corrector.evaluate(current_report, docs_text, user_query)
+            
+            if evaluation.passed:
+                print(f"✅ 보고서 품질 통과 (시도 {attempt+1})")
+                break
+            
+            # (B) 수정 (Refine) - 마지막 시도가 아닐 때만
+            if attempt < MAX_RETRIES - 1:
+                print(f"💡 피드백 반영: {evaluation.feedback}")
+                current_report = await self.corrector.refine(current_report, evaluation.feedback, docs_text)
+            else:
+                print("⚠️ 최대 수정 횟수 도달. 현재 버전을 확정합니다.")
+
+        # 3. 최종 결과 저장
+        state["report_text"] = current_report
+        # DOCX용 데이터는 구조 깨짐 방지를 위해 초안 데이터를 유지
+        state["summary_cause"] = summary_cause 
+        state["summary_action_plan"] = action_plan 
+        
+        state["route"] = "report_complete"
         return state
 
     def _run_web_search(self, state: AgentState) -> AgentState:
         return state 
 
     def _create_docx_file(self, state: AgentState) -> AgentState:
-        """(로직 유지)"""
         user_query = state.get("user_query", "")
         summary_cause = state.get("summary_cause", "")
         action_plan = state.get("summary_action_plan", "")
         source_references = state.get("source_references", [])
         
-        if not user_query or not summary_cause or not action_plan: return state
+        if not user_query: return state
 
         try:
             docx_path = create_accident_report_docx(
                 user_query=user_query,
                 cause_text=summary_cause,
                 action_text=action_plan,
-                source_references=source_references, # ✅ 여기서 docx_writer에 전달됨
+                source_references=source_references,
             )
             with open(docx_path, "rb") as f:
-                docx_bytes = f.read()
+                state["docx_bytes"] = f.read()
             state["docx_path"] = docx_path
-            state["docx_bytes"] = docx_bytes
             state["route"] = "docx_complete"
         except Exception as exc:
             print(f"❌ DOCX 생성 실패: {exc}")
@@ -549,31 +486,81 @@ class ReportWriterAgent:
         print(f"\n{'='*80}\n📝 [{self.name}] 실행 중...\n{'='*80}")
         
         action, reason = await self._decide_action(state) 
-        
-        # HITL 초기화
         state["hitl_action"] = None
         state["hitl_payload"] = {}
         
         print(f"🤖 선택된 작업: {action} | 이유: {reason}")
 
-        handler = self.action_handlers.get(action)
-        if handler:
-            # handler는 동기 함수이므로 그냥 호출 (필요시 cl.make_async 사용 가능)
-            state = handler(state) 
-        elif action == "noop":
-            print("ℹ️ 수행할 작업이 없습니다.")
-        else:
-            print(f"⚠️ 알 수 없는 작업 '{action}'")
-
+        if action == "final_report":
+            state = await self._generate_final_report_with_correction(state)
+        elif action == "create_docx":
+            state = self._create_docx_file(state)
+        elif action == "web_search":
+            state = self._run_web_search(state)
+        
         return state
 
 # ========================================
-# WebSearchAgent (기존 유지)
+# WebSearchAgent (최종 수정본: HITL 및 Source 통합)
 # ========================================
 class WebSearchAgent:
     def __init__(self):
         self.searcher = WebSearch()
+        # 🔥 [수정] 요약(고지능 작업)은 get_llm("smart") (GPT-4o) 사용
+        self.llm = get_llm("smart") 
     
+    # 🔥 [추가] 웹 문서에서 Source Reference를 추출하는 헬퍼 함수
+    def _extract_web_sources(self, docs_web: List[Document], existing_sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Tavily 검색 결과 Document를 source_references 형식에 맞게 변환하여 기존 리스트에 추가"""
+        
+        # 기존 source_references 리스트의 마지막 인덱스를 확인
+        # RAG 문서와 웹 문서가 섞여서 들어가므로 인덱스를 이어서 부여합니다.
+        start_idx = len(existing_sources) + 1
+        
+        new_sources = []
+        for i, doc in enumerate(docs_web):
+            metadata = doc.metadata
+            
+            # 웹 검색 결과는 'web'으로 명확히 구분
+            source_entry = {
+                "idx": start_idx + i,
+                "filename": metadata.get("title", metadata.get("source", "웹 문서")), # 제목 또는 URL을 파일 이름으로 사용
+                "hierarchy": "",
+                "section": metadata.get("source", "N/A"), # URL을 섹션으로 사용
+                "db": "web", # 웹 검색임을 명시
+                "relevance_summary": doc.page_content[:150] + "...", # 내용의 일부를 요약으로 사용
+                "key_sentences": []
+            }
+            new_sources.append(source_entry)
+            
+        return existing_sources + new_sources
+
+    # 🔥 [추가] 웹 검색 결과를 요약하는 헬퍼 함수
+    async def _summarize_web_docs(self, state: AgentState) -> str:
+        web_docs: List[Document] = state.get("web_docs") or []
+        if not web_docs:
+            return "웹 검색 결과가 없습니다."
+        
+        doc_texts = "\n---\n".join([f"Source: {d.metadata.get('source', 'Unknown')}\nContent: {d.page_content}" for d in web_docs])
+        query = state.get("web_query")
+        
+        system_template = "당신은 사용자 질문에 기반하여 웹 검색 결과를 간결하게 요약해주는 전문가입니다. 요약은 한국어로 작성하며, 검색 결과를 모두 포함하되 중복을 제거하고 핵심만 정리하세요."
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_template),
+            ("user", "검색 질문: {query}\n\n[검색 결과]\n{doc_texts}\n\n이 검색 결과들을 바탕으로 질문에 답이 될 만한 내용을 2~3문장으로 요약하고, 관련 출처를 명시해줘.")
+        ])
+        
+        chain = prompt | self.llm
+        
+        try:
+            print("\n📰 [WebSearchAgent] 검색 결과 요약 중...")
+            summary = await chain.ainvoke({"query": query, "doc_texts": doc_texts[:10000]})
+            return summary.content
+        except Exception as e:
+            print(f"❌ 웹 검색 결과 요약 실패: {e}")
+            return "웹 검색 결과가 있지만, 요약하는 데 실패했습니다. 원본 문서를 참조하세요."
+
     async def run(self, state: AgentState) -> AgentState: 
         print("\n" + "🌐"*50 + "\n🌐  WebSearchAgent 실행\n" + "🌐"*50)
         
@@ -583,16 +570,28 @@ class WebSearchAgent:
             return state
         
         try:
-            # WebSearch.run()이 동기 함수이므로 cl.make_async로 비동기 실행
+            # 1. 웹 검색 실행 (state["web_docs"]와 state["retrieved_docs"]가 갱신됨)
             state = await cl.make_async(self.searcher.run)(state) 
-            
-            # HITL 초기화
-            state["hitl_action"] = None
-            state["hitl_payload"] = {}
+            docs_web: List[Document] = state.get("web_docs") or [] # 검색된 웹 문서
 
+            # 2. 🔥 [수정] 검색된 웹 문서를 source_references에 추가
+            existing_sources = state.get("source_references", []) or []
+            updated_sources = self._extract_web_sources(docs_web, existing_sources)
+            state["source_references"] = updated_sources
+            
+            # 3. 검색 결과를 요약하여 상태에 저장
+            summary_text = await self._summarize_web_docs(state)
+            state["web_search_summary"] = summary_text # 사용자에게 보여줄 요약
+            
+            # --- 🔥 [핵심 수정] HITL 단계를 위해 사용자 대기 상태로 변경 ---
+            state["hitl_action"] = None # 다음 루프에서 HITL이 실행되도록 초기화
+            state["hitl_payload"] = {}
+            
             state["web_search_completed"] = True
-            state["route"] = "web_search_complete"
-            print("\n✅ WebSearchAgent 완료!")
+            state["wait_for_user"] = True # 사용자 피드백 대기
+            state["route"] = "await_web_feedback"
+            
+            print("\n✅ WebSearchAgent 완료! (사용자 피드백 대기)")
             
         except Exception as e:
             print(f"❌ WebSearchAgent 오류: {e}")
@@ -600,7 +599,6 @@ class WebSearchAgent:
             state["web_error"] = str(e)
             
         return state
-
 # ========================================
 # Agent Registry
 # ========================================

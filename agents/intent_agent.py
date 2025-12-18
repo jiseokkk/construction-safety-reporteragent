@@ -20,6 +20,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
+from core.llm_factory import get_llm
 
 
 # ======================================================================
@@ -29,10 +30,10 @@ class IntentAnalysis(BaseModel):
     """사용자 입력 분석 결과 스키마"""
     
     reasoning: str = Field(
-        description="날짜 추출 근거와 키워드 분석을 포함한 사고 과정(Chain-of-Thought)."
+        description="기간/특정일 여부와 조건(공종, 유형 등) 유무를 분석한 사고 과정."
     )
     date: Optional[str] = Field(
-        description="추출된 날짜 (YYYY-MM-DD 형식). 날짜가 없거나 불명확하면 null(None).",
+        description="추출된 날짜 정보 (YYYY-MM-DD 또는 YYYY-MM). 날짜가 없거나 불명확하면 null(None).",
         default=None
     )
     intent: Literal["csv_info", "search_only", "generate_report", "query_sql"] = Field(
@@ -53,12 +54,8 @@ class IntentAgent:
         self.current_year = datetime.now().year
         self.last_query = None
         
-        # ✅ LangChain 초기화 (temperature=0으로 일관성 확보)
-        self.llm = ChatOpenAI(
-            model="gpt-4o", 
-            temperature=0,
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        # 🔄 [변경] Qwen(Fast) 모델 사용 (비용 절감 & 속도 향상)
+        self.llm = get_llm(mode="smart") 
         self.parser = PydanticOutputParser(pydantic_object=IntentAnalysis)
     
     def parse_and_decide(self, user_input: str, df: pd.DataFrame) -> Dict:
@@ -66,28 +63,32 @@ class IntentAgent:
         사용자 입력을 LCEL로 파싱하고 의도에 따라 처리
         """
         
-        # 1. 시스템 프롬프트 (기존 로직을 LangChain 템플릿으로 변환)
+        # 1. 시스템 프롬프트 (조건 검색과 단순 조회를 구분하도록 강화)
         system_template = """
 당신은 건설안전 사고 관리 시스템의 IntentAgent입니다.
 현재 연도: {current_year}
 
-## 임무 1: 날짜 추출
-사용자 입력에서 날짜를 추출하고 YYYY-MM-DD 형식으로 변환하세요.
-- "7월 3일 사고" → "2024-07-03" (연도가 없으면 현재 연도 사용)
-- "24년 8월 8일" → "2024-08-08"
+## 임무 1: 날짜/기간 추출
+- "11월 4일 사고" → "2024-11-04" (특정일)
+- "11월 사고", "11월에 발생한" → "2024-11" (기간/월)
+- "2023년 사고" → "2023" (기간/년)
 
-## 임무 2: 의도 파악 (4가지 의도)
-1. csv_info: "정보", "알려줘", "세부사항" + 명확한 날짜
-2. search_only: "검색", "지침", "규정", "조회" (RAG 관련)
-3. generate_report: "보고서", "작성", "문서", "DOCX"
-4. query_sql: "최근", "통계", "몇 건", "가장 많은", "전체" (복합 쿼리)
+## 임무 2: 의도 파악 (우선순위가 매우 중요함)
 
-## 우선순위 규칙
-1. "보고서", "작성" → generate_report
-2. "지침", "규정" → search_only
-3. 복합 쿼리 키워드 발견 시 → query_sql
-4. 날짜만 명확하고 다른 키워드가 없을 때 → csv_info
-5. 날짜가 없거나 애매한 경우 → query_sql
+🔥 **[우선순위 1] SQL 검색 (query_sql)**
+- **날짜 + 조건**이 결합된 경우 (예: "11월 철근콘크리트 사고", "작년 추락 사고")
+- **특정 월(Month)이나 연도(Year)** 전체를 포괄적으로 물어보는 경우 (예: "11월 사고 보여줘")
+- 통계나 집계를 물어보는 경우 (예: "가장 많이 발생한", "몇 건이야")
+
+✅ **[우선순위 2] 상세 조회 (csv_info)**
+- 오직 **특정 날짜(YYYY-MM-DD)** 하루의 사고만 물어볼 때 (예: "11월 4일 사고 알려줘")
+- 다른 조건(공종, 사고유형 등) 없이 날짜만 명확할 때
+
+🔍 **[우선순위 3] 지침 검색 (search_only)**
+- "지침", "규정", "법규", "검색" 키워드 포함 (단, 사고 조회가 아닐 때)
+
+📝 **[우선순위 4] 보고서 (generate_report)**
+- "보고서", "작성", "문서", "DOCX"
 
 반드시 아래 형식을 준수하여 JSON으로 응답해야 합니다:
 {format_instructions}
@@ -130,7 +131,7 @@ class IntentAgent:
         
         # 🔑 query_sql 의도는 사고 데이터 검색을 건너뛰고 바로 반환
         if intent == "query_sql":
-            print(f"\n💡 의도: query_sql (복합 쿼리). CSV 검색 생략.")
+            print(f"\n💡 의도: query_sql (기간/조건 검색). CSV 직접 검색 생략.")
             return {
                 "success": True,
                 "date": date_str, 
@@ -139,84 +140,78 @@ class IntentAgent:
                 "accident_data": None
             }
 
-        # 단일 사고 처리가 필요한데 날짜가 없으면 실패
+        # 단일 사고 처리가 필요한데 날짜가 없으면 실패 -> SQL로 유도
         if not date_str:
             return {
                 "success": False,
                 "error": "날짜를 추출할 수 없습니다.",
-                "intent": intent
+                "intent": "query_sql" # 날짜 없으면 SQL로 fallback
             }
         
-        # CSV에서 날짜로 검색
+        # CSV에서 날짜로 검색 (csv_info 로직)
         try:
             target_date = pd.to_datetime(date_str)
             filtered = df[df['발생일시_parsed'] == target_date]
             
             if filtered.empty:
+                # 해당 날짜에 없으면 SQL로 넘겨서 비슷한 거라도 찾게 함
                 return {
-                    "success": False,
-                    "error": f"'{date_str}' 날짜에 사고 기록이 없습니다.",
-                    "intent": intent
+                    "success": True,
+                    "date": date_str,
+                    "intent": "query_sql",
+                    "accident_data": None
                 }
             
-            # 사고 선택
-            accident_data = self._select_accident(filtered)
-            
-            if accident_data is None and len(filtered) > 1:
-                # 다중 사고 발견 (Chainlit UI 처리용)
+            # ✅ [수정됨] 다중 사고 발견 시 'candidates' 반환 (Orchestrator ASK_USER용)
+            if len(filtered) > 1:
+                print(f"⚠️ 다중 사고 발견: {len(filtered)}건 -> 목록 반환")
                 return {
                     "success": True, 
                     "date": date_str,
                     "intent": intent,
                     "confidence": parsed.confidence,
-                    "accident_data": None 
-                }
-            elif accident_data is None:
-                # 선택 취소
-                return {
-                    "success": False,
-                    "error": "사고 선택이 취소되었습니다.",
-                    "intent": intent
+                    "accident_data": None,
+                    "candidates": filtered.to_dict(orient="records") # 후보 목록 반환
                 }
             
+            # 단일 사고 발견
+            accident_data = self._select_accident(filtered)
+            if accident_data is None: 
+                # _select_accident 내부에서 다중 처리 시 None 반환할 수 있음
+                return {
+                    "success": True, 
+                    "date": date_str,
+                    "intent": intent,
+                    "confidence": parsed.confidence,
+                    "accident_data": None,
+                    "candidates": filtered.to_dict(orient="records")
+                }
+
             return {
                 "success": True,
                 "date": date_str,
                 "intent": intent,
                 "confidence": parsed.confidence,
-                "accident_data": accident_data
+                "accident_data": accident_data.to_dict() # Series -> Dict
             }
             
         except Exception as e:
+            # 날짜 파싱 오류 등 발생 시 SQL로 안전하게 넘김
             return {
-                "success": False,
-                "error": f"데이터 처리 오류: {e}",
-                "intent": intent
+                "success": True,
+                "date": date_str,
+                "intent": "query_sql",
+                "accident_data": None
             }
     
     def _select_accident(self, filtered: pd.DataFrame) -> Optional[pd.Series]:
         """여러 사고 중 선택 (콘솔 로깅용)"""
-        print(f"\n✅ {len(filtered)}건의 사고 기록을 찾았습니다:")
-        print("=" * 100)
-        
-        for idx, (_, row) in enumerate(filtered.iterrows(), 1):
-            print(f"\n[{idx}] ID: {row.get('ID', 'N/A')}")
-            print(f"    발생일시: {row.get('발생일시', 'N/A')}")
-            print(f"    공종: {row.get('공종(중분류)', 'N/A')}")
-            print(f"    사고유형: {row.get('인적사고', 'N/A')}")
-            
-            accident_cause = str(row.get('사고원인', 'N/A'))
-            if len(accident_cause) > 50:
-                accident_cause = accident_cause[:50] + "..."
-            print(f"    사고원인: {accident_cause}")
-        
-        print("=" * 100)
-        
+        print(f"\n✅ {len(filtered)}건의 사고 기록을 찾았습니다.")
         if len(filtered) > 1:
-            print("\n⚠️ 다중 사고 발견. Chainlit 환경에서 선택합니다.")
+            print("⚠️ 다중 사고 발견. 목록을 반환합니다.")
             return None 
         else:
-            print("\n✅ 1건의 사고가 자동 선택되었습니다.")
+            print("✅ 1건의 사고가 자동 선택되었습니다.")
             return filtered.iloc[0]
     
     def _default_result(self) -> Dict:
@@ -224,5 +219,5 @@ class IntentAgent:
         return {
             "success": False,
             "error": "입력을 이해할 수 없습니다.",
-            "intent": "csv_info"
+            "intent": "query_sql" # 모르면 SQL로
         }

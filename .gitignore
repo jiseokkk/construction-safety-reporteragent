@@ -1,3 +1,14 @@
 .env
 __pycache__/
 *.pyc
+# 모델 가중치 무시
+*.pt
+*.bin
+*.safetensors
+*.gguf
+*.ckpt
+
+# 벡터 DB 무시
+vector_store/
+faiss_index/
+chroma_db/

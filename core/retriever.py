@@ -34,7 +34,7 @@ class SingleDBHybridRetriever:
         self,
         db_dir: str,
         top_k: int = 20,
-        alpha: float = 0.3,
+        alpha: float = 0.7,
         rerank_top_n: int = 5,
         reranker_model: str = "BAAI/bge-reranker-v2-m3"
     ):
@@ -89,7 +89,7 @@ class SingleDBHybridRetriever:
 
         # 2) Sparse(keyword)
         sparse_retriever = BM25Retriever.from_documents(self.all_docs)
-        sparse_retriever.k = self.top_k * 4
+        sparse_retriever.k = self.top_k 
         sparse = sparse_retriever.get_relevant_documents(query)
 
         # 3) Hybrid merge
